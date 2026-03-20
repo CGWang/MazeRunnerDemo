@@ -5,8 +5,7 @@ namespace LLMAgent
 {
     /// <summary>
     /// Main controller for the AI Maze Runner demo scene.
-    /// Manages Agent lifecycle, user interaction, and UI state.
-    /// Attach this to an empty GameObject in the MazeDemo scene.
+    /// Uses UnityAgent (pure C#) — no PuerTS / TypeScript dependencies.
     /// </summary>
     public class MazeDemoManager : MonoBehaviour
     {
@@ -36,7 +35,7 @@ namespace LLMAgent
         public MazeAgentUI agentUI;
 
         // Internal state
-        private AgentScriptManager agent;
+        private UnityAgent agent;
         private bool isExploring;
         private bool isInitialized;
 
@@ -76,24 +75,20 @@ namespace LLMAgent
             }
         }
 
-        /// <summary>
-        /// Initialize the Agent and load all modules.
-        /// </summary>
         private void InitializeAgent()
         {
             SetState(DemoState.Initializing);
-            Debug.Log("[MazeDemoManager] Initializing maze-runner agent...");
+            Debug.Log("[MazeDemoManager] Initializing UnityAgent...");
 
-            agent = new AgentScriptManager();
+            agent = UnityAgent.Instance;
             agent.Initialize(agentResourceRoot, () =>
             {
-                Debug.Log("[MazeDemoManager] Agent initialized successfully.");
+                Debug.Log("[MazeDemoManager] Agent initialized.");
 
-                // Configure with API key if provided
                 if (!string.IsNullOrEmpty(apiKey))
                 {
-                    string configResult = agent.ConfigureAgent(apiKey, baseURL, model, maxSteps);
-                    Debug.Log($"[MazeDemoManager] Agent configured: {configResult}");
+                    agent.Configure(apiKey, baseURL, model, maxSteps);
+                    Debug.Log("[MazeDemoManager] Agent configured.");
                 }
 
                 isInitialized = true;
@@ -101,9 +96,6 @@ namespace LLMAgent
             });
         }
 
-        /// <summary>
-        /// Start the maze exploration. Called by UI button or programmatically.
-        /// </summary>
         public void StartExploration()
         {
             if (!isInitialized)
@@ -118,7 +110,7 @@ namespace LLMAgent
                 return;
             }
 
-            if (!agent.IsAgentConfigured())
+            if (!agent.IsConfigured)
             {
                 Debug.LogError("[MazeDemoManager] Agent not configured. Please set API key.");
                 SetState(DemoState.Error);
@@ -137,7 +129,6 @@ namespace LLMAgent
                 "", // no image attachment
                 (response, isError) =>
                 {
-                    // Called when the AI finishes its full response
                     agentUI?.HideThinking();
                     isExploring = false;
 
@@ -151,7 +142,6 @@ namespace LLMAgent
                     {
                         Debug.Log($"[MazeDemoManager] Agent response: {response}");
 
-                        // Check if the maze was actually completed by querying the goal detector
                         bool mazeActuallyCompleted = false;
                         var playerObj = GameObject.FindWithTag("Player");
                         if (playerObj != null)
@@ -177,19 +167,14 @@ namespace LLMAgent
                 },
                 (progressText) =>
                 {
-                    // Progress callback — AI is streaming/thinking
-                    // Keep showing thinking bubble during progress
                     if (!string.IsNullOrEmpty(progressText))
                     {
-                        Debug.Log($"[MazeDemoManager] Progress: {progressText.Substring(0, Math.Min(100, progressText.Length))}...");
+                        Debug.Log($"[MazeDemoManager] {progressText}");
                     }
                 }
             );
         }
 
-        /// <summary>
-        /// Stop the current exploration (abort generation).
-        /// </summary>
         public void StopExploration()
         {
             if (agent != null && isExploring)
@@ -202,9 +187,6 @@ namespace LLMAgent
             }
         }
 
-        /// <summary>
-        /// Reset the maze: clear history, reset player position, etc.
-        /// </summary>
         public void ResetMaze()
         {
             if (agent != null)
@@ -215,7 +197,6 @@ namespace LLMAgent
             isExploring = false;
             agentUI?.ResetUI();
 
-            // Reset goal detector on player
             var playerObj = GameObject.FindWithTag("Player");
             if (playerObj != null)
             {
@@ -248,7 +229,6 @@ namespace LLMAgent
                     agentUI?.SetStatus("Maze Completed!");
                     break;
                 case DemoState.Error:
-                    // Status already set by caller
                     break;
             }
         }
