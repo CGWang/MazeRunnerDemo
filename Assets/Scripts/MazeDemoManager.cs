@@ -6,98 +6,152 @@ using UnityEngine;
 namespace LLMAgent
 {
     /// <summary>
-    /// Maze Runner demo — registers maze-specific tools with UnityAgent
-    /// and manages the demo UI/lifecycle.
+    /// Maze Runner demo — registers maze-specific tools with UnityAgent,
+    /// wires up AgentChatUI for continuous multi-turn conversation.
     /// </summary>
     public class MazeDemoManager : MonoBehaviour
     {
         [Header("Agent Settings")]
-        [Tooltip("Resource path for the system prompt (without extension).")]
         public string systemPromptResource = "maze-runner/system-prompt.md";
-
-        [Tooltip("API Key for the LLM service.")]
         public string apiKey = "";
-
-        [Tooltip("Base URL for the LLM API (leave empty for default).")]
         public string baseURL = "";
-
-        [Tooltip("Model name (leave empty for default).")]
         public string model = "";
-
-        [Tooltip("Maximum tool-call steps per generation. 0 = default (25).")]
         public int maxSteps = 0;
 
         [Header("Maze Settings")]
         [TextArea(3, 5)]
-        public string startMessage = "红色标记是迷宫终点，走到终点。";
+        public string welcomeMessage = "AI Agent ready. Type a message to start, " +
+            "or click 'Auto Explore' to let the AI navigate the maze.";
 
-        [Header("Screenshot Settings")]
+        [Tooltip("Message sent when 'Auto Explore' is clicked.")]
+        [TextArea(2, 3)]
+        public string autoExploreMessage = "红色标记是迷宫终点，走到终点。";
+
+        [Header("Screenshot")]
         public int screenshotWidth = 512;
         public int screenshotHeight = 512;
 
         [Header("References")]
+        public AgentChatUI chatUI;
         public MazeAgentUI agentUI;
 
-        // State
         private UnityAgent agent;
-        private bool isExploring;
-        private bool isInitialized;
-
-        private enum DemoState
-        {
-            Uninitialized, Initializing, Ready, Exploring, Completed, Error
-        }
-        private DemoState currentState = DemoState.Uninitialized;
 
         private void Awake()
         {
             Application.runInBackground = true;
+            if (chatUI == null) chatUI = FindObjectOfType<AgentChatUI>();
             if (agentUI == null) agentUI = FindObjectOfType<MazeAgentUI>();
         }
 
-        private void Start() => InitializeAgent();
-
-        private void OnDestroy()
+        private void Start()
         {
-            if (agent != null) { agent.Dispose(); agent = null; }
-        }
-
-        // =================================================================
-        // Initialization — configure agent and register maze tools
-        // =================================================================
-
-        private void InitializeAgent()
-        {
-            SetState(DemoState.Initializing);
-
             agent = UnityAgent.Instance;
             agent.LoadSystemPrompt(systemPromptResource);
 
             if (!string.IsNullOrEmpty(apiKey))
                 agent.Configure(apiKey, baseURL, model, maxSteps);
 
-            // Register maze-specific tools
             RegisterTools();
 
-            isInitialized = true;
-            SetState(DemoState.Ready);
-            Debug.Log("[MazeDemoManager] Agent initialized with maze tools.");
+            // Bind chat UI to agent events
+            if (chatUI != null)
+            {
+                chatUI.BindAgent(agent);
+                chatUI.OnUserMessage += HandleUserMessage;
+                chatUI.AddSystemMessage(welcomeMessage);
+            }
+
+            // Wire up thinking bubble
+            agent.OnGenerationStart += () => agentUI?.ShowThinking();
+            agent.OnGenerationEnd += () => agentUI?.HideThinking();
+
+            Debug.Log("[MazeDemoManager] Initialized — chat mode active.");
         }
+
+        private void OnDestroy()
+        {
+            if (chatUI != null)
+            {
+                chatUI.UnbindAgent(agent);
+                chatUI.OnUserMessage -= HandleUserMessage;
+            }
+            if (agent != null) agent.Dispose();
+        }
+
+        // =================================================================
+        // Chat message handling — continuous multi-turn
+        // =================================================================
+
+        private void HandleUserMessage(string message)
+        {
+            if (!agent.IsConfigured)
+            {
+                chatUI?.AddSystemMessage("Error: API not configured. Set API key in MazeDemoManager.");
+                return;
+            }
+
+            if (agent.IsRunning)
+            {
+                chatUI?.AddSystemMessage("Agent is busy. Please wait or click Stop.");
+                return;
+            }
+
+            agentUI?.SetStatus("Thinking...");
+
+            agent.SendMessageAsync(message, null,
+                (response, isError) =>
+                {
+                    if (isError)
+                    {
+                        chatUI?.AddSystemMessage($"Error: {response}");
+                        agentUI?.SetStatus("Error");
+                    }
+                    else
+                    {
+                        // Check maze completion
+                        var playerObj = GameObject.FindWithTag("Player");
+                        bool completed = playerObj != null &&
+                            playerObj.GetComponent<MazeGoalDetector>()?.HasReachedGoal == true;
+
+                        if (completed)
+                        {
+                            agentUI?.ShowMazeCompleted();
+                            agentUI?.SetStatus("Maze Completed!");
+                        }
+                        else
+                        {
+                            agentUI?.SetStatus("Ready");
+                        }
+                    }
+                },
+                progress =>
+                {
+                    agentUI?.SetStatus(progress);
+                }
+            );
+        }
+
+        // =================================================================
+        // Tool registration
+        // =================================================================
 
         private void RegisterTools()
         {
-            // --- getPlayerStatus ---
             agent.RegisterTool(
                 "getPlayerStatus",
-                "Get the player's current position and obstacle distances in all 4 cardinal directions (north/south/east/west), measured in grid cells. Also reports whether the goal has been reached.",
-                null, // no parameters
+                "Get the player's current position and obstacle distances in all 4 cardinal " +
+                "directions (north/south/east/west), measured in grid cells. Also reports whether " +
+                "the goal has been reached.",
+                null,
                 HandleGetPlayerStatus
             );
 
-            // --- movePath ---
             agent.RegisterTool(
                 "movePath",
-                "Move the player along a sequence of direction segments. Each segment has a compass direction and a number of grid cells to move. Stops early if blocked by a wall or if the goal is reached. Maximum 20 segments, 1-10 cells per step.",
+                "Move the player along a sequence of direction segments. Each segment has a " +
+                "compass direction and a number of grid cells to move. Stops early if blocked " +
+                "by a wall or if the goal is reached. Maximum 20 segments, 1-10 cells per step.",
                 @"{
                     ""type"": ""object"",
                     ""properties"": {
@@ -109,12 +163,10 @@ namespace LLMAgent
                                 ""properties"": {
                                     ""dir"": {
                                         ""type"": ""string"",
-                                        ""enum"": [""north"", ""south"", ""east"", ""west""],
-                                        ""description"": ""Compass direction to move.""
+                                        ""enum"": [""north"", ""south"", ""east"", ""west""]
                                     },
                                     ""steps"": {
                                         ""type"": ""integer"",
-                                        ""description"": ""Number of grid cells to move (1-10)."",
                                         ""minimum"": 1,
                                         ""maximum"": 10
                                     }
@@ -128,10 +180,10 @@ namespace LLMAgent
                 HandleMovePath
             );
 
-            // --- captureScreenshot ---
             agent.RegisterTool(
                 "captureScreenshot",
-                "Capture a top-down screenshot of the current game view. Returns the image for visual analysis of the maze layout, walls, corridors, and the red goal marker.",
+                "Capture a top-down screenshot of the current game view. Returns the image " +
+                "for visual analysis of the maze layout, walls, corridors, and goal marker.",
                 null,
                 HandleCaptureScreenshot
             );
@@ -147,20 +199,17 @@ namespace LLMAgent
             bool done = false;
             MazePlayerBridge.GetPlayerStatus(r => { result = r; done = true; });
             while (!done) yield return null;
-
             callback(new UnityAgent.ToolResult { content = result });
         }
 
         private IEnumerator HandleMovePath(string arguments, Action<UnityAgent.ToolResult> callback)
         {
-            // Parse {"segments":[{"dir":"north","steps":3},...]} into directions/distances arrays
             string directionsJson, distancesJson;
             if (!ParseMovePathArgs(arguments, out directionsJson, out distancesJson))
             {
                 callback(new UnityAgent.ToolResult
                 {
-                    content = "{\"success\":false,\"error\":\"Failed to parse movePath arguments. " +
-                        "Expected: {\\\"segments\\\":[{\\\"dir\\\":\\\"north\\\",\\\"steps\\\":3}]}\"}"
+                    content = "{\"success\":false,\"error\":\"Failed to parse movePath arguments.\"}"
                 });
                 yield break;
             }
@@ -173,7 +222,6 @@ namespace LLMAgent
                 done = true;
             });
             while (!done) yield return null;
-
             callback(new UnityAgent.ToolResult { content = result });
         }
 
@@ -185,37 +233,33 @@ namespace LLMAgent
             if (cam == null)
             {
                 callback(new UnityAgent.ToolResult
-                {
-                    content = "{\"success\":false,\"error\":\"No main camera found.\"}"
-                });
+                    { content = "{\"success\":false,\"error\":\"No main camera.\"}" });
                 yield break;
             }
 
             int w = screenshotWidth, h = screenshotHeight;
             var rt = new RenderTexture(w, h, 24);
-            var prevTarget = cam.targetTexture;
+            var prev = cam.targetTexture;
 
             cam.targetTexture = rt;
             cam.Render();
-
             RenderTexture.active = rt;
+
             var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
             tex.ReadPixels(new Rect(0, 0, w, h), 0, 0);
             tex.Apply();
 
-            cam.targetTexture = prevTarget;
+            cam.targetTexture = prev;
             RenderTexture.active = null;
             Destroy(rt);
 
             byte[] png = tex.EncodeToPNG();
             Destroy(tex);
 
-            string base64 = Convert.ToBase64String(png);
-
             callback(new UnityAgent.ToolResult
             {
                 content = $"{{\"success\":true,\"message\":\"Screenshot captured ({w}x{h}).\"}}",
-                imageBase64 = base64,
+                imageBase64 = Convert.ToBase64String(png),
                 imageMimeType = "image/png"
             });
         }
@@ -250,7 +294,6 @@ namespace LLMAgent
                 if (objEnd < 0) break;
 
                 string seg = arrStr.Substring(objStart, objEnd - objStart + 1);
-
                 string dir = UnityAgent.ExtractStringField(seg, "dir")
                     ?? UnityAgent.ExtractStringField(seg, "direction");
                 string steps = UnityAgent.ExtractNumberField(seg, "steps")
@@ -266,131 +309,69 @@ namespace LLMAgent
             }
 
             if (directions.Count == 0) return false;
-
             directionsJson = "[" + string.Join(",", directions) + "]";
             distancesJson = "[" + string.Join(",", distances) + "]";
             return true;
         }
 
         // =================================================================
-        // Demo lifecycle
+        // OnGUI — minimal control buttons (chat replaces the old button panel)
         // =================================================================
 
-        public void StartExploration()
+        private void OnGUI()
         {
-            if (!isInitialized || isExploring) return;
+            float btnW = 130f, btnH = 30f, pad = 8f;
+            // Position buttons above the chat panel area, top-right of game view
+            float x = anchorRight() ? Screen.width - chatPanelWidth() - btnW - pad * 2 : chatPanelWidth() + pad;
+            float y = pad;
 
-            if (!agent.IsConfigured)
+            GUI.skin.button.fontSize = 13;
+
+            if (!agent.IsRunning)
             {
-                SetState(DemoState.Error);
-                agentUI?.SetStatus("Error: API not configured");
-                return;
-            }
-
-            isExploring = true;
-            SetState(DemoState.Exploring);
-            agentUI?.ShowThinking();
-
-            agent.SendMessageAsync(startMessage, "",
-                (response, isError) =>
+                if (agent.IsConfigured && GUI.Button(new Rect(x, y, btnW, btnH), "Auto Explore"))
                 {
-                    agentUI?.HideThinking();
-                    isExploring = false;
+                    chatUI?.AddUserMessage(autoExploreMessage);
+                    HandleUserMessage(autoExploreMessage);
+                }
+                y += btnH + 4;
 
-                    if (isError)
-                    {
-                        Debug.LogError($"[MazeDemoManager] Error: {response}");
-                        SetState(DemoState.Error);
-                        agentUI?.SetStatus($"Error: {response}");
-                        return;
-                    }
-
-                    Debug.Log($"[MazeDemoManager] Response: {response}");
-
-                    var playerObj = GameObject.FindWithTag("Player");
-                    bool completed = playerObj != null &&
-                        playerObj.GetComponent<MazeGoalDetector>()?.HasReachedGoal == true;
-
-                    if (completed)
-                    {
-                        SetState(DemoState.Completed);
-                        agentUI?.ShowMazeCompleted();
-                    }
-                    else
-                    {
-                        SetState(DemoState.Ready);
-                        agentUI?.SetStatus("Exploration paused (step limit reached)");
-                    }
-                },
-                progress => Debug.Log($"[MazeDemoManager] {progress}")
-            );
-        }
-
-        public void StopExploration()
-        {
-            if (agent != null && isExploring)
+                if (GUI.Button(new Rect(x, y, btnW, btnH), "Reset Maze"))
+                {
+                    ResetMaze();
+                }
+            }
+            else
             {
-                agent.AbortGeneration();
-                isExploring = false;
-                agentUI?.HideThinking();
-                SetState(DemoState.Ready);
+                if (GUI.Button(new Rect(x, y, btnW, btnH), "Stop"))
+                {
+                    agent.AbortGeneration();
+                    agentUI?.SetStatus("Stopped");
+                }
             }
         }
 
-        public void ResetMaze()
+        private float chatPanelWidth()
+        {
+            return chatUI != null ? chatUI.panelWidth : 380f;
+        }
+
+        private bool anchorRight()
+        {
+            return chatUI == null || chatUI.anchorRight;
+        }
+
+        private void ResetMaze()
         {
             agent?.ClearHistory();
-            isExploring = false;
+            chatUI?.Clear();
             agentUI?.ResetUI();
 
             var playerObj = GameObject.FindWithTag("Player");
             playerObj?.GetComponent<MazeGoalDetector>()?.ResetGoal();
 
-            SetState(DemoState.Ready);
-        }
-
-        private void SetState(DemoState s)
-        {
-            currentState = s;
-            switch (s)
-            {
-                case DemoState.Initializing: agentUI?.SetStatus("Initializing..."); break;
-                case DemoState.Ready: agentUI?.SetStatus("Ready — Press Start"); break;
-                case DemoState.Exploring: agentUI?.SetStatus("Exploring..."); break;
-                case DemoState.Completed: agentUI?.SetStatus("Maze Completed!"); break;
-            }
-        }
-
-        // =================================================================
-        // OnGUI
-        // =================================================================
-
-        private void OnGUI()
-        {
-            float btnW = 140f, btnH = 36f, pad = 10f;
-            float x = Screen.width - btnW - pad, y = pad;
-            GUI.skin.button.fontSize = 14;
-
-            switch (currentState)
-            {
-                case DemoState.Ready:
-                    if (GUI.Button(new Rect(x, y, btnW, btnH), "▶ Start Exploration")) StartExploration();
-                    y += btnH + 5;
-                    if (GUI.Button(new Rect(x, y, btnW, btnH), "🔄 Reset")) ResetMaze();
-                    break;
-                case DemoState.Exploring:
-                    if (GUI.Button(new Rect(x, y, btnW, btnH), "⏹ Stop")) StopExploration();
-                    break;
-                case DemoState.Completed:
-                    if (GUI.Button(new Rect(x, y, btnW, btnH), "🔄 Play Again")) ResetMaze();
-                    break;
-                case DemoState.Error:
-                    if (GUI.Button(new Rect(x, y, btnW, btnH), "🔄 Retry")) ResetMaze();
-                    break;
-                case DemoState.Initializing:
-                    GUI.Label(new Rect(x, y, btnW, btnH), "Loading...");
-                    break;
-            }
+            chatUI?.AddSystemMessage("Maze reset. " + welcomeMessage);
+            agentUI?.SetStatus("Ready");
         }
     }
 }
