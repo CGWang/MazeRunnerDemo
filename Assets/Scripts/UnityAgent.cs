@@ -8,26 +8,102 @@ using UnityEngine.Networking;
 namespace LLMAgent
 {
     /// <summary>
-    /// Pure C# LLM agent that calls OpenAI-compatible Chat Completions API,
-    /// handles tool calling loops, and dispatches to MazePlayerBridge / screenshot capture.
-    /// No PuerTS, no V8, no TypeScript — just C# and UnityWebRequest.
+    /// Generic LLM agent for Unity. Calls OpenAI-compatible Chat Completions API,
+    /// runs tool-calling loops, and dispatches to user-registered tool handlers.
+    /// No external dependencies — just C# and UnityWebRequest.
+    ///
+    /// Usage:
+    ///   var agent = UnityAgent.Instance;
+    ///   agent.Configure(apiKey, baseURL, model, maxSteps);
+    ///   agent.SetSystemPrompt(prompt);
+    ///   agent.RegisterTool("myTool", "description", paramsJson, MyHandler);
+    ///   agent.SendMessageAsync("hello", null, callback, progress);
     /// </summary>
     public class UnityAgent : MonoBehaviour
     {
-        // --- Configuration ---
+        // =================================================================
+        // Public types
+        // =================================================================
+
+        /// <summary>Result returned by a tool handler.</summary>
+        public struct ToolResult
+        {
+            /// <summary>Text content sent back to the LLM as the tool result.</summary>
+            public string content;
+
+            /// <summary>
+            /// Optional base64-encoded image. If set, an additional user message
+            /// with the image is injected after the tool result so the LLM can see it.
+            /// (Most APIs don't support images inside tool result messages.)
+            /// </summary>
+            public string imageBase64;
+
+            /// <summary>MIME type of the image. Defaults to "image/png".</summary>
+            public string imageMimeType;
+        }
+
+        /// <summary>
+        /// Coroutine-based tool handler. Receives the arguments JSON string from the LLM,
+        /// performs work (may yield), and invokes the callback with the result.
+        /// </summary>
+        public delegate IEnumerator ToolHandler(string arguments, Action<ToolResult> callback);
+
+        // =================================================================
+        // Configuration
+        // =================================================================
+
         private string apiKey;
         private string baseURL = "https://api.openai.com/v1";
         private string model = "gpt-4o";
         private int maxSteps = 25;
-        private string systemPrompt;
+        private string systemPrompt = "";
 
-        // --- Conversation state ---
+        /// <summary>
+        /// Approximate character budget for conversation history.
+        /// When exceeded, oldest messages are trimmed (sliding window).
+        /// Default 400,000 chars ≈ 100K tokens.
+        /// </summary>
+        public int maxContextChars = 400_000;
+
+        /// <summary>
+        /// Minimum number of recent messages to always keep,
+        /// even when trimming for context length.
+        /// </summary>
+        public int minKeepMessages = 10;
+
+        /// <summary>Maximum retry attempts for transient API errors (429, 5xx).</summary>
+        public int maxRetries = 3;
+
+        // =================================================================
+        // Tool registry
+        // =================================================================
+
+        private struct RegisteredTool
+        {
+            public string name;
+            public string definitionJson; // Full {"type":"function","function":{...}} object
+            public ToolHandler handler;
+        }
+
+        private readonly List<RegisteredTool> tools = new List<RegisteredTool>();
+        private string cachedToolsJson;
+        private bool toolsJsonDirty = true;
+
+        // =================================================================
+        // Conversation state
+        // =================================================================
+
         private readonly List<string> conversationHistory = new List<string>();
+        private readonly List<int> messageCharCounts = new List<int>();
         private bool isRunning;
         private bool abortRequested;
 
-        // --- Singleton runner (hidden, like MazePlayerRunner) ---
+        // =================================================================
+        // Singleton
+        // =================================================================
+
         private static UnityAgent _instance;
+
         public static UnityAgent Instance
         {
             get
@@ -43,9 +119,9 @@ namespace LLMAgent
             }
         }
 
-        // =====================================================================
-        // Public API
-        // =====================================================================
+        // =================================================================
+        // Public API — Configuration
+        // =================================================================
 
         public void Configure(string apiKey, string baseURL, string model, int maxSteps)
         {
@@ -55,16 +131,89 @@ namespace LLMAgent
             if (maxSteps > 0) this.maxSteps = maxSteps;
         }
 
-        public void Initialize(string resourceRoot, Action onReady)
+        public void SetSystemPrompt(string prompt)
         {
-            var promptAsset = Resources.Load<TextAsset>(resourceRoot + "/system-prompt.md");
-            systemPrompt = promptAsset != null ? promptAsset.text : "";
-            Debug.Log($"[UnityAgent] System prompt loaded ({systemPrompt.Length} chars).");
-            onReady?.Invoke();
+            systemPrompt = prompt ?? "";
+        }
+
+        /// <summary>Load system prompt from a TextAsset in Resources.</summary>
+        public void LoadSystemPrompt(string resourcePath)
+        {
+            var asset = Resources.Load<TextAsset>(resourcePath);
+            systemPrompt = asset != null ? asset.text : "";
+            Debug.Log($"[UnityAgent] System prompt loaded ({systemPrompt.Length} chars) from {resourcePath}");
         }
 
         public bool IsConfigured => !string.IsNullOrEmpty(apiKey);
+        public bool IsRunning => isRunning;
 
+        // =================================================================
+        // Public API — Tool registration
+        // =================================================================
+
+        /// <summary>
+        /// Register a tool that the LLM can call.
+        /// </summary>
+        /// <param name="name">Tool name (must match what the LLM will call).</param>
+        /// <param name="description">Human-readable description for the LLM.</param>
+        /// <param name="parametersJson">
+        /// JSON Schema for the parameters object, e.g.:
+        /// {"type":"object","properties":{"x":{"type":"number"}},"required":["x"]}
+        /// Pass null or empty for no parameters.
+        /// </param>
+        /// <param name="handler">Coroutine handler that executes the tool.</param>
+        public void RegisterTool(string name, string description, string parametersJson, ToolHandler handler)
+        {
+            if (string.IsNullOrEmpty(parametersJson))
+                parametersJson = "{\"type\":\"object\",\"properties\":{},\"required\":[]}";
+
+            string defJson = "{\"type\":\"function\",\"function\":{" +
+                $"\"name\":\"{EscapeJson(name)}\"," +
+                $"\"description\":\"{EscapeJson(description)}\"," +
+                $"\"parameters\":{parametersJson}" +
+                "}}";
+
+            // Replace if already registered
+            for (int i = 0; i < tools.Count; i++)
+            {
+                if (tools[i].name == name)
+                {
+                    tools[i] = new RegisteredTool { name = name, definitionJson = defJson, handler = handler };
+                    toolsJsonDirty = true;
+                    return;
+                }
+            }
+
+            tools.Add(new RegisteredTool { name = name, definitionJson = defJson, handler = handler });
+            toolsJsonDirty = true;
+        }
+
+        /// <summary>Unregister a previously registered tool.</summary>
+        public void UnregisterTool(string name)
+        {
+            tools.RemoveAll(t => t.name == name);
+            toolsJsonDirty = true;
+        }
+
+        /// <summary>Remove all registered tools.</summary>
+        public void ClearTools()
+        {
+            tools.Clear();
+            toolsJsonDirty = true;
+        }
+
+        // =================================================================
+        // Public API — Conversation
+        // =================================================================
+
+        /// <summary>
+        /// Send a message to the LLM and run the full tool-calling loop until
+        /// the LLM produces a final text response or limits are reached.
+        /// </summary>
+        /// <param name="message">User message text.</param>
+        /// <param name="imageBase64">Optional base64-encoded image to attach.</param>
+        /// <param name="callback">Called with (response, isError) when done.</param>
+        /// <param name="progressCallback">Called after each tool execution with a status string.</param>
         public void SendMessageAsync(string message, string imageBase64,
             Action<string, bool> callback, Action<string> progressCallback)
         {
@@ -78,17 +227,21 @@ namespace LLMAgent
 
         public void AbortGeneration() => abortRequested = true;
 
-        public void ClearHistory() => conversationHistory.Clear();
+        public void ClearHistory()
+        {
+            conversationHistory.Clear();
+            messageCharCounts.Clear();
+        }
 
         public void Dispose()
         {
             AbortGeneration();
-            conversationHistory.Clear();
+            ClearHistory();
         }
 
-        // =====================================================================
+        // =================================================================
         // Agent loop
-        // =====================================================================
+        // =================================================================
 
         private IEnumerator RunAgentLoop(string userMessage, string imageBase64,
             Action<string, bool> callback, Action<string> progressCallback)
@@ -96,21 +249,24 @@ namespace LLMAgent
             isRunning = true;
             abortRequested = false;
 
-            // Build user message
-            conversationHistory.Add(BuildUserMessage(userMessage, imageBase64));
+            AddMessage(BuildUserMessage(userMessage, imageBase64));
 
             int steps = 0;
             string finalResponse = "";
 
             while (steps < maxSteps && !abortRequested)
             {
-                // Build request JSON
-                string requestBody = BuildRequestBody();
+                // Trim history if over budget
+                TrimHistory();
 
-                // Call API
+                // On the last allowed step, disable tools and ask for summary
+                bool isLastStep = (steps == maxSteps - 1);
+                string requestBody = BuildRequestBody(disableTools: isLastStep);
+
+                // Call API with retry
                 string responseBody = null;
                 string error = null;
-                yield return CallAPI(requestBody, (res, err) =>
+                yield return CallAPIWithRetry(requestBody, (res, err) =>
                 {
                     responseBody = res;
                     error = err;
@@ -123,25 +279,24 @@ namespace LLMAgent
                     yield break;
                 }
 
-                // Parse response — extract the choice
+                // Parse response
                 string assistantContent;
                 string finishReason;
-                List<ToolCall> toolCalls;
+                List<ToolCallInfo> toolCalls;
                 string assistantMessageJson;
 
                 if (!ParseResponse(responseBody, out assistantContent, out finishReason,
                         out toolCalls, out assistantMessageJson))
                 {
                     isRunning = false;
-                    callback?.Invoke($"Failed to parse API response: {responseBody}", true);
+                    callback?.Invoke($"Failed to parse API response: {Truncate(responseBody, 500)}", true);
                     yield break;
                 }
 
-                // Add assistant message to history
-                conversationHistory.Add(assistantMessageJson);
+                AddMessage(assistantMessageJson);
 
-                // If there are tool calls, execute them
-                if (toolCalls != null && toolCalls.Count > 0)
+                // Execute tool calls if any
+                if (toolCalls != null && toolCalls.Count > 0 && !isLastStep)
                 {
                     foreach (var tc in toolCalls)
                     {
@@ -149,35 +304,47 @@ namespace LLMAgent
 
                         steps++;
                         progressCallback?.Invoke($"[{steps}/{maxSteps}] {tc.name}");
-                        Debug.Log($"[UnityAgent] Tool call #{steps}: {tc.name}({Truncate(tc.arguments, 120)})");
+                        Debug.Log($"[UnityAgent] Step {steps}: {tc.name}({Truncate(tc.arguments, 120)})");
 
-                        // Execute the tool
-                        string toolResult = null;
-                        string screenshotBase64 = null;
-                        bool toolDone = false;
-
-                        yield return ExecuteTool(tc.name, tc.arguments, (result, imgB64) =>
+                        // Find handler
+                        ToolHandler handler = null;
+                        foreach (var t in tools)
                         {
-                            toolResult = result;
-                            screenshotBase64 = imgB64;
-                            toolDone = true;
-                        });
+                            if (t.name == tc.name) { handler = t.handler; break; }
+                        }
 
-                        // Add tool result message
-                        conversationHistory.Add(BuildToolResultMessage(tc.id, toolResult));
-
-                        // If there's an image from screenshot, inject as a user message
-                        // (most APIs don't support images in tool results)
-                        if (!string.IsNullOrEmpty(screenshotBase64))
+                        if (handler == null)
                         {
-                            conversationHistory.Add(BuildImageMessage(screenshotBase64));
+                            AddMessage(BuildToolResultMessage(tc.id,
+                                $"{{\"error\":\"Unknown tool: {EscapeJson(tc.name)}\"}}"));
+                            continue;
+                        }
+
+                        // Execute handler
+                        ToolResult toolResult = default;
+                        bool done = false;
+                        yield return handler(tc.arguments, r => { toolResult = r; done = true; });
+                        if (!done)
+                        {
+                            // Handler didn't call callback — wait
+                            while (!done) yield return null;
+                        }
+
+                        AddMessage(BuildToolResultMessage(tc.id, toolResult.content ?? ""));
+
+                        // Inject image if provided
+                        if (!string.IsNullOrEmpty(toolResult.imageBase64))
+                        {
+                            string mime = string.IsNullOrEmpty(toolResult.imageMimeType)
+                                ? "image/png" : toolResult.imageMimeType;
+                            AddMessage(BuildImageMessage(toolResult.imageBase64, mime));
                         }
                     }
-                    continue; // Loop back to call API with tool results
+                    continue; // Loop back to call LLM with tool results
                 }
                 else
                 {
-                    // No tool calls — final text response
+                    // No tool calls or last step — final response
                     finalResponse = assistantContent ?? "";
                     break;
                 }
@@ -187,121 +354,112 @@ namespace LLMAgent
 
             if (abortRequested)
                 callback?.Invoke("Generation aborted.", true);
-            else if (steps >= maxSteps)
-                callback?.Invoke(finalResponse + "\n[Reached max steps]", false);
+            else if (steps >= maxSteps && string.IsNullOrEmpty(finalResponse))
+                callback?.Invoke("[Reached max steps without final response]", false);
             else
                 callback?.Invoke(finalResponse, false);
         }
 
-        // =====================================================================
-        // Tool execution — dispatch to C# methods directly
-        // =====================================================================
+        // =================================================================
+        // Conversation history management & sliding window
+        // =================================================================
 
-        private IEnumerator ExecuteTool(string toolName, string arguments,
-            Action<string, string> callback)
+        private void AddMessage(string messageJson)
         {
-            switch (toolName)
+            conversationHistory.Add(messageJson);
+            messageCharCounts.Add(messageJson.Length);
+        }
+
+        /// <summary>
+        /// Sliding window: drop oldest messages when total chars exceed budget.
+        /// Preserves at least <see cref="minKeepMessages"/> recent messages.
+        /// Drops image-bearing messages preferentially (they're the biggest).
+        /// </summary>
+        private void TrimHistory()
+        {
+            int totalChars = 0;
+            foreach (var c in messageCharCounts) totalChars += c;
+
+            if (totalChars <= maxContextChars) return;
+
+            int canDrop = conversationHistory.Count - minKeepMessages;
+            if (canDrop <= 0) return;
+
+            // First pass: drop image messages from the front (biggest savings)
+            for (int i = 0; i < canDrop && totalChars > maxContextChars; i++)
             {
-                case "getPlayerStatus":
-                    yield return ExecuteGetPlayerStatus(callback);
-                    break;
+                if (conversationHistory[i].Contains("image_url"))
+                {
+                    totalChars -= messageCharCounts[i];
+                    conversationHistory.RemoveAt(i);
+                    messageCharCounts.RemoveAt(i);
+                    canDrop--;
+                    i--;
+                }
+            }
 
-                case "movePath":
-                    yield return ExecuteMovePath(arguments, callback);
-                    break;
+            // Second pass: drop any messages from the front
+            while (canDrop > 0 && totalChars > maxContextChars &&
+                   conversationHistory.Count > minKeepMessages)
+            {
+                totalChars -= messageCharCounts[0];
+                conversationHistory.RemoveAt(0);
+                messageCharCounts.RemoveAt(0);
+                canDrop--;
+            }
 
-                case "captureScreenshot":
-                    yield return ExecuteCaptureScreenshot(callback);
-                    break;
-
-                default:
-                    callback?.Invoke($"{{\"error\": \"Unknown tool: {EscapeJson(toolName)}\"}}", null);
-                    break;
+            if (totalChars > maxContextChars)
+            {
+                Debug.LogWarning($"[UnityAgent] History still {totalChars} chars after trimming " +
+                    $"(budget {maxContextChars}). Consider increasing maxContextChars or reducing minKeepMessages.");
             }
         }
 
-        private IEnumerator ExecuteGetPlayerStatus(Action<string, string> callback)
+        // =================================================================
+        // HTTP with retry
+        // =================================================================
+
+        private IEnumerator CallAPIWithRetry(string requestBody, Action<string, string> callback)
         {
-            string result = null;
-            bool done = false;
-            MazePlayerBridge.GetPlayerStatus(r => { result = r; done = true; });
+            int attempt = 0;
 
-            // GetPlayerStatus is synchronous (no coroutine), but callback pattern
-            // If not done immediately, wait
-            while (!done) yield return null;
-
-            callback?.Invoke(result, null);
-        }
-
-        private IEnumerator ExecuteMovePath(string arguments, Action<string, string> callback)
-        {
-            // Parse arguments: {"segments": [{"dir":"north","steps":3}, ...]}
-            // Extract directions and distances arrays for MoveSequenceV2
-            string directionsJson;
-            string distancesJson;
-
-            if (!ParseMovePathArgs(arguments, out directionsJson, out distancesJson))
+            while (true)
             {
-                callback?.Invoke("{\"success\":false,\"error\":\"Failed to parse movePath arguments. " +
-                    "Expected: {\\\"segments\\\": [{\\\"dir\\\":\\\"north\\\",\\\"steps\\\":3}]}\"}", null);
-                yield break;
+                string responseBody = null;
+                string error = null;
+                long httpCode = 0;
+
+                yield return CallAPI(requestBody, (res, err, code) =>
+                {
+                    responseBody = res;
+                    error = err;
+                    httpCode = code;
+                });
+
+                // Success
+                if (error == null)
+                {
+                    callback?.Invoke(responseBody, null);
+                    yield break;
+                }
+
+                // Retryable errors: 429 (rate limit), 500+ (server error)
+                attempt++;
+                bool retryable = httpCode == 429 || httpCode >= 500;
+
+                if (!retryable || attempt >= maxRetries)
+                {
+                    callback?.Invoke(null, error);
+                    yield break;
+                }
+
+                float delay = Mathf.Pow(2f, attempt); // 2s, 4s, 8s
+                Debug.LogWarning($"[UnityAgent] HTTP {httpCode}, retrying in {delay}s (attempt {attempt}/{maxRetries})...");
+                yield return new WaitForSeconds(delay);
             }
-
-            string result = null;
-            bool done = false;
-            MazePlayerBridge.MoveSequenceV2(directionsJson, distancesJson, r =>
-            {
-                result = r;
-                done = true;
-            });
-
-            while (!done) yield return null;
-
-            callback?.Invoke(result, null);
         }
 
-        private IEnumerator ExecuteCaptureScreenshot(Action<string, string> callback)
-        {
-            yield return new WaitForEndOfFrame();
-
-            var cam = Camera.main;
-            if (cam == null)
-            {
-                callback?.Invoke("{\"success\":false,\"error\":\"No main camera found.\"}", null);
-                yield break;
-            }
-
-            int width = 512;
-            int height = 512;
-            var rt = new RenderTexture(width, height, 24);
-            var prevTarget = cam.targetTexture;
-
-            cam.targetTexture = rt;
-            cam.Render();
-
-            RenderTexture.active = rt;
-            var tex = new Texture2D(width, height, TextureFormat.RGB24, false);
-            tex.ReadPixels(new Rect(0, 0, width, height), 0, 0);
-            tex.Apply();
-
-            cam.targetTexture = prevTarget;
-            RenderTexture.active = null;
-            Destroy(rt);
-
-            byte[] png = tex.EncodeToPNG();
-            Destroy(tex);
-
-            string base64 = Convert.ToBase64String(png);
-
-            string resultJson = $"{{\"success\":true,\"message\":\"Screenshot captured ({width}x{height}).\"}}";
-            callback?.Invoke(resultJson, base64);
-        }
-
-        // =====================================================================
-        // HTTP — UnityWebRequest to OpenAI-compatible API
-        // =====================================================================
-
-        private IEnumerator CallAPI(string requestBody, Action<string, string> callback)
+        private IEnumerator CallAPI(string requestBody, Action<string, string, long> callback)
         {
             string url = baseURL + "/chat/completions";
 
@@ -315,56 +473,92 @@ namespace LLMAgent
 
             yield return request.SendWebRequest();
 
+            long code = request.responseCode;
             if (request.result == UnityWebRequest.Result.Success)
             {
-                callback?.Invoke(request.downloadHandler.text, null);
+                callback?.Invoke(request.downloadHandler.text, null, code);
             }
             else
             {
-                string errorDetail = request.downloadHandler?.text ?? request.error;
-                callback?.Invoke(null, $"HTTP {request.responseCode}: {errorDetail}");
+                string detail = request.downloadHandler?.text ?? request.error;
+                callback?.Invoke(null, $"HTTP {code}: {detail}", code);
             }
 
             request.Dispose();
         }
 
-        // =====================================================================
-        // JSON building — construct OpenAI request body
-        // =====================================================================
+        // =================================================================
+        // JSON building
+        // =================================================================
 
-        private string BuildRequestBody()
+        private string BuildRequestBody(bool disableTools)
         {
             var sb = new StringBuilder(4096);
             sb.Append("{");
             sb.Append($"\"model\":\"{EscapeJson(model)}\",");
             sb.Append("\"messages\":[");
 
-            // System message
+            // System prompt
             sb.Append($"{{\"role\":\"system\",\"content\":\"{EscapeJson(systemPrompt)}\"}}");
+
+            // On last step, inject a directive to wrap up
+            if (disableTools)
+            {
+                sb.Append(",{\"role\":\"system\",\"content\":\"");
+                sb.Append(EscapeJson("[SYSTEM] You have reached the maximum number of tool-call steps. " +
+                    "Do NOT call any more tools. Summarize your progress and current state in text."));
+                sb.Append("\"}");
+            }
 
             // Conversation history
             foreach (var msg in conversationHistory)
             {
                 sb.Append(",");
-                sb.Append(msg); // Already valid JSON
+                sb.Append(msg);
             }
 
-            sb.Append("],");
-            sb.Append("\"tools\":");
-            sb.Append(ToolDefinitionsJson);
-            sb.Append("}");
+            sb.Append("]");
 
+            // Tools (omit entirely on last step to force text-only response)
+            if (!disableTools && tools.Count > 0)
+            {
+                sb.Append(",\"tools\":");
+                sb.Append(GetToolsJson());
+            }
+
+            sb.Append("}");
             return sb.ToString();
         }
 
-        private string BuildUserMessage(string text, string imageBase64)
+        private string GetToolsJson()
+        {
+            if (!toolsJsonDirty && cachedToolsJson != null) return cachedToolsJson;
+
+            var sb = new StringBuilder();
+            sb.Append("[");
+            for (int i = 0; i < tools.Count; i++)
+            {
+                if (i > 0) sb.Append(",");
+                sb.Append(tools[i].definitionJson);
+            }
+            sb.Append("]");
+
+            cachedToolsJson = sb.ToString();
+            toolsJsonDirty = false;
+            return cachedToolsJson;
+        }
+
+        // =================================================================
+        // Message builders
+        // =================================================================
+
+        private static string BuildUserMessage(string text, string imageBase64)
         {
             if (string.IsNullOrEmpty(imageBase64))
             {
                 return $"{{\"role\":\"user\",\"content\":\"{EscapeJson(text)}\"}}";
             }
 
-            // Multimodal message with text + image
             return "{\"role\":\"user\",\"content\":[" +
                    $"{{\"type\":\"text\",\"text\":\"{EscapeJson(text)}\"}}," +
                    "{\"type\":\"image_url\",\"image_url\":{" +
@@ -372,26 +566,26 @@ namespace LLMAgent
                    "}}]}";
         }
 
-        private string BuildImageMessage(string base64)
+        private static string BuildImageMessage(string base64, string mimeType)
         {
             return "{\"role\":\"user\",\"content\":[" +
-                   "{\"type\":\"text\",\"text\":\"[Screenshot captured]\"}," +
+                   "{\"type\":\"text\",\"text\":\"[Image from tool result]\"}," +
                    "{\"type\":\"image_url\",\"image_url\":{" +
-                   $"\"url\":\"data:image/png;base64,{base64}\"" +
+                   $"\"url\":\"data:{EscapeJson(mimeType)};base64,{base64}\"" +
                    "}}]}";
         }
 
-        private string BuildToolResultMessage(string toolCallId, string content)
+        private static string BuildToolResultMessage(string toolCallId, string content)
         {
             return $"{{\"role\":\"tool\",\"tool_call_id\":\"{EscapeJson(toolCallId)}\"," +
                    $"\"content\":\"{EscapeJson(content)}\"}}";
         }
 
-        // =====================================================================
-        // JSON parsing — extract fields from API response
-        // =====================================================================
+        // =================================================================
+        // Response parsing
+        // =================================================================
 
-        private struct ToolCall
+        private struct ToolCallInfo
         {
             public string id;
             public string name;
@@ -399,25 +593,21 @@ namespace LLMAgent
         }
 
         private bool ParseResponse(string json, out string content, out string finishReason,
-            out List<ToolCall> toolCalls, out string assistantMessageJson)
+            out List<ToolCallInfo> toolCalls, out string assistantMessageJson)
         {
             content = null;
             finishReason = null;
             toolCalls = null;
             assistantMessageJson = null;
 
-            // Find "choices" array, extract first element
             int choicesIdx = json.IndexOf("\"choices\"", StringComparison.Ordinal);
             if (choicesIdx < 0) return false;
 
-            // Extract finish_reason
             finishReason = ExtractStringField(json, "finish_reason");
 
-            // Extract the "message" object from the first choice
             int msgIdx = json.IndexOf("\"message\"", choicesIdx, StringComparison.Ordinal);
             if (msgIdx < 0) return false;
 
-            // Find the message object boundaries
             int msgObjStart = json.IndexOf('{', msgIdx);
             if (msgObjStart < 0) return false;
             int msgObjEnd = FindMatchingBrace(json, msgObjStart);
@@ -426,10 +616,8 @@ namespace LLMAgent
             string messageObj = json.Substring(msgObjStart, msgObjEnd - msgObjStart + 1);
             assistantMessageJson = messageObj;
 
-            // Extract content (can be null)
             content = ExtractStringField(messageObj, "content");
 
-            // Extract tool_calls array if present
             int tcIdx = messageObj.IndexOf("\"tool_calls\"", StringComparison.Ordinal);
             if (tcIdx >= 0)
             {
@@ -439,8 +627,8 @@ namespace LLMAgent
                     int arrEnd = FindMatchingBracket(messageObj, arrStart);
                     if (arrEnd >= 0)
                     {
-                        string tcArrayStr = messageObj.Substring(arrStart, arrEnd - arrStart + 1);
-                        toolCalls = ParseToolCalls(tcArrayStr);
+                        toolCalls = ParseToolCalls(
+                            messageObj.Substring(arrStart, arrEnd - arrStart + 1));
                     }
                 }
             }
@@ -448,9 +636,9 @@ namespace LLMAgent
             return true;
         }
 
-        private List<ToolCall> ParseToolCalls(string arrayJson)
+        private static List<ToolCallInfo> ParseToolCalls(string arrayJson)
         {
-            var result = new List<ToolCall>();
+            var result = new List<ToolCallInfo>();
             int pos = 0;
 
             while (pos < arrayJson.Length)
@@ -463,22 +651,18 @@ namespace LLMAgent
 
                 string objStr = arrayJson.Substring(objStart, objEnd - objStart + 1);
 
-                var tc = new ToolCall
-                {
-                    id = ExtractStringField(objStr, "id") ?? ""
-                };
+                var tc = new ToolCallInfo { id = ExtractStringField(objStr, "id") ?? "" };
 
-                // Extract function.name and function.arguments
                 int fnIdx = objStr.IndexOf("\"function\"", StringComparison.Ordinal);
                 if (fnIdx >= 0)
                 {
-                    int fnObjStart = objStr.IndexOf('{', fnIdx);
-                    if (fnObjStart >= 0)
+                    int fnStart = objStr.IndexOf('{', fnIdx);
+                    if (fnStart >= 0)
                     {
-                        int fnObjEnd = FindMatchingBrace(objStr, fnObjStart);
-                        if (fnObjEnd >= 0)
+                        int fnEnd = FindMatchingBrace(objStr, fnStart);
+                        if (fnEnd >= 0)
                         {
-                            string fnStr = objStr.Substring(fnObjStart, fnObjEnd - fnObjStart + 1);
+                            string fnStr = objStr.Substring(fnStart, fnEnd - fnStart + 1);
                             tc.name = ExtractStringField(fnStr, "name") ?? "";
                             tc.arguments = ExtractStringField(fnStr, "arguments") ?? "{}";
                         }
@@ -492,139 +676,11 @@ namespace LLMAgent
             return result;
         }
 
-        /// <summary>
-        /// Parse movePath arguments: {"segments":[{"dir":"north","steps":3},...]}
-        /// Convert to directionsJson=["north",...] and distancesJson=[3,...]
-        /// </summary>
-        private bool ParseMovePathArgs(string arguments, out string directionsJson, out string distancesJson)
-        {
-            directionsJson = null;
-            distancesJson = null;
+        // =================================================================
+        // JSON utility helpers — zero external dependencies
+        // =================================================================
 
-            var directions = new List<string>();
-            var distances = new List<string>();
-
-            // Find "segments" array
-            int segIdx = arguments.IndexOf("\"segments\"", StringComparison.Ordinal);
-            if (segIdx < 0)
-            {
-                // Maybe the arguments IS the array directly
-                segIdx = arguments.IndexOf('[');
-                if (segIdx < 0) return false;
-            }
-
-            int arrStart = arguments.IndexOf('[', segIdx);
-            if (arrStart < 0) return false;
-            int arrEnd = FindMatchingBracket(arguments, arrStart);
-            if (arrEnd < 0) return false;
-
-            string arrStr = arguments.Substring(arrStart, arrEnd - arrStart + 1);
-
-            // Parse each segment object
-            int pos = 0;
-            while (pos < arrStr.Length)
-            {
-                int objStart = arrStr.IndexOf('{', pos);
-                if (objStart < 0) break;
-                int objEnd = FindMatchingBrace(arrStr, objStart);
-                if (objEnd < 0) break;
-
-                string segStr = arrStr.Substring(objStart, objEnd - objStart + 1);
-
-                string dir = ExtractStringField(segStr, "dir");
-                if (string.IsNullOrEmpty(dir))
-                    dir = ExtractStringField(segStr, "direction");
-                string stepsStr = ExtractNumberField(segStr, "steps");
-                if (string.IsNullOrEmpty(stepsStr))
-                    stepsStr = ExtractNumberField(segStr, "distance");
-
-                if (!string.IsNullOrEmpty(dir) && !string.IsNullOrEmpty(stepsStr))
-                {
-                    directions.Add($"\"{dir}\"");
-                    distances.Add(stepsStr);
-                }
-
-                pos = objEnd + 1;
-            }
-
-            if (directions.Count == 0) return false;
-
-            directionsJson = "[" + string.Join(",", directions) + "]";
-            distancesJson = "[" + string.Join(",", distances) + "]";
-            return true;
-        }
-
-        // =====================================================================
-        // Tool definitions JSON
-        // =====================================================================
-
-        private const string ToolDefinitionsJson = @"[
-  {
-    ""type"": ""function"",
-    ""function"": {
-      ""name"": ""getPlayerStatus"",
-      ""description"": ""Get the player's current position and obstacle distances in all 4 cardinal directions (north/south/east/west), measured in grid cells. Also reports whether the goal has been reached."",
-      ""parameters"": {
-        ""type"": ""object"",
-        ""properties"": {},
-        ""required"": []
-      }
-    }
-  },
-  {
-    ""type"": ""function"",
-    ""function"": {
-      ""name"": ""movePath"",
-      ""description"": ""Move the player along a sequence of direction segments. Each segment has a compass direction and a number of grid cells to move. Stops early if blocked by a wall or if the goal is reached. Maximum 20 segments, 1-10 cells per step."",
-      ""parameters"": {
-        ""type"": ""object"",
-        ""properties"": {
-          ""segments"": {
-            ""type"": ""array"",
-            ""description"": ""Array of movement segments."",
-            ""items"": {
-              ""type"": ""object"",
-              ""properties"": {
-                ""dir"": {
-                  ""type"": ""string"",
-                  ""enum"": [""north"", ""south"", ""east"", ""west""],
-                  ""description"": ""Compass direction to move.""
-                },
-                ""steps"": {
-                  ""type"": ""integer"",
-                  ""description"": ""Number of grid cells to move (1-10)."",
-                  ""minimum"": 1,
-                  ""maximum"": 10
-                }
-              },
-              ""required"": [""dir"", ""steps""]
-            }
-          }
-        },
-        ""required"": [""segments""]
-      }
-    }
-  },
-  {
-    ""type"": ""function"",
-    ""function"": {
-      ""name"": ""captureScreenshot"",
-      ""description"": ""Capture a top-down screenshot of the current game view. Returns the image for visual analysis of the maze layout, walls, corridors, and the red goal marker."",
-      ""parameters"": {
-        ""type"": ""object"",
-        ""properties"": {},
-        ""required"": []
-      }
-    }
-  }
-]";
-
-        // =====================================================================
-        // JSON utility helpers — no external dependencies
-        // =====================================================================
-
-        /// <summary>Extract a string field value: "key":"value"</summary>
-        private static string ExtractStringField(string json, string key)
+        internal static string ExtractStringField(string json, string key)
         {
             string pattern = "\"" + key + "\"";
             int keyIdx = json.IndexOf(pattern, StringComparison.Ordinal);
@@ -633,20 +689,16 @@ namespace LLMAgent
             int colonIdx = json.IndexOf(':', keyIdx + pattern.Length);
             if (colonIdx < 0) return null;
 
-            // Skip whitespace after colon
             int valStart = colonIdx + 1;
             while (valStart < json.Length && char.IsWhiteSpace(json[valStart])) valStart++;
-
             if (valStart >= json.Length) return null;
 
-            // Check for null
             if (json[valStart] == 'n' && valStart + 3 < json.Length &&
                 json.Substring(valStart, 4) == "null")
                 return null;
 
             if (json[valStart] != '"') return null;
 
-            // Read until unescaped closing quote
             var sb = new StringBuilder();
             int i = valStart + 1;
             while (i < json.Length)
@@ -676,12 +728,10 @@ namespace LLMAgent
                     i++;
                 }
             }
-
             return sb.ToString();
         }
 
-        /// <summary>Extract a number field value: "key":123</summary>
-        private static string ExtractNumberField(string json, string key)
+        internal static string ExtractNumberField(string json, string key)
         {
             string pattern = "\"" + key + "\"";
             int keyIdx = json.IndexOf(pattern, StringComparison.Ordinal);
@@ -700,18 +750,15 @@ namespace LLMAgent
                 sb.Append(json[i]);
                 i++;
             }
-
             return sb.Length > 0 ? sb.ToString() : null;
         }
 
-        /// <summary>Find the matching closing brace for an opening brace.</summary>
-        private static int FindMatchingBrace(string json, int openIdx)
+        internal static int FindMatchingBrace(string json, int openIdx)
         {
             return FindMatching(json, openIdx, '{', '}');
         }
 
-        /// <summary>Find the matching closing bracket for an opening bracket.</summary>
-        private static int FindMatchingBracket(string json, int openIdx)
+        internal static int FindMatchingBracket(string json, int openIdx)
         {
             return FindMatching(json, openIdx, '[', ']');
         }
@@ -724,27 +771,20 @@ namespace LLMAgent
             for (int i = openIdx; i < json.Length; i++)
             {
                 char c = json[i];
-
                 if (inString)
                 {
                     if (c == '\\') { i++; continue; }
                     if (c == '"') inString = false;
                     continue;
                 }
-
                 if (c == '"') { inString = true; continue; }
                 if (c == open) depth++;
-                if (c == close)
-                {
-                    depth--;
-                    if (depth == 0) return i;
-                }
+                if (c == close) { depth--; if (depth == 0) return i; }
             }
-
             return -1;
         }
 
-        private static string EscapeJson(string s)
+        internal static string EscapeJson(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
             var sb = new StringBuilder(s.Length + 16);
@@ -760,10 +800,8 @@ namespace LLMAgent
                     case '\b': sb.Append("\\b"); break;
                     case '\f': sb.Append("\\f"); break;
                     default:
-                        if (c < 0x20)
-                            sb.AppendFormat("\\u{0:X4}", (int)c);
-                        else
-                            sb.Append(c);
+                        if (c < 0x20) sb.AppendFormat("\\u{0:X4}", (int)c);
+                        else sb.Append(c);
                         break;
                 }
             }
@@ -772,7 +810,7 @@ namespace LLMAgent
 
         private static string Truncate(string s, int maxLen)
         {
-            if (string.IsNullOrEmpty(s) || s.Length <= maxLen) return s;
+            if (string.IsNullOrEmpty(s) || s.Length <= maxLen) return s ?? "";
             return s.Substring(0, maxLen) + "...";
         }
     }
