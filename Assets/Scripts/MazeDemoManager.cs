@@ -58,7 +58,68 @@ namespace LLMAgent
             if (agentUI == null) agentUI = FindObjectOfType<MazeAgentUI>();
         }
 
+        // Track whether this is a fresh start vs domain reload restore
+        [SerializeField, HideInInspector]
+        private bool hasInitialized;
+
         private void Start()
+        {
+            InitAgent();
+
+            if (!hasInitialized)
+            {
+                // Fresh start — show welcome or restore from disk
+                if (agent.LoadSession(SessionPath))
+                {
+                    chatUI?.AddSystemMessage("[Session restored]");
+                }
+                else
+                {
+                    chatUI?.AddSystemMessage(welcomeMessage);
+                }
+                hasInitialized = true;
+            }
+            // If hasInitialized == true, this is a domain reload.
+            // AgentChatUI messages survived via [SerializeField].
+            // Agent conversation is restored from disk below.
+
+            Debug.Log("[MazeDemoManager] Initialized — chat mode active.");
+        }
+
+        /// <summary>
+        /// Called before Domain Reload. Save agent state to disk so it survives recompile.
+        /// Unity lifecycle: OnDisable → [reload] → OnEnable → Start is NOT called again
+        /// unless the object was destroyed. But for DontDestroyOnLoad singletons,
+        /// Start IS called again. So we use OnDisable/OnEnable as the reliable pair.
+        /// </summary>
+        private void OnDisable()
+        {
+            if (autoSaveSession && agent != null) SaveAll();
+
+            // Unbind events to avoid stale references after reload
+            if (chatUI != null && agent != null)
+            {
+                chatUI.UnbindAgent(agent);
+                chatUI.OnUserMessage -= HandleUserMessage;
+            }
+        }
+
+        /// <summary>
+        /// Called after Domain Reload. Rebuild agent and restore state from disk.
+        /// </summary>
+        private void OnEnable()
+        {
+            // After domain reload, agent singleton was destroyed.
+            // Reinitialize everything.
+            if (hasInitialized)
+            {
+                InitAgent();
+                // Restore agent conversation from disk (chat UI messages survive via SerializeField)
+                agent.LoadSession(SessionPath);
+            }
+        }
+
+        private void InitAgent()
         {
             agent = UnityAgent.Instance;
             agent.LoadSystemPrompt(systemPromptResource);
@@ -66,43 +127,26 @@ namespace LLMAgent
             if (!string.IsNullOrEmpty(apiKey))
                 agent.Configure(apiKey, baseURL, model, maxSteps);
 
-            // Load long-term memory
             agent.LoadMemory(MemoryPath);
-
             RegisterTools();
 
-            // Bind chat UI to agent events
             if (chatUI != null)
             {
                 chatUI.BindAgent(agent);
                 chatUI.OnUserMessage += HandleUserMessage;
             }
 
-            // Wire up thinking bubble
             agent.OnGenerationStart += () => agentUI?.ShowThinking();
             agent.OnGenerationEnd += () =>
             {
                 agentUI?.HideThinking();
                 if (autoSaveSession) SaveAll();
             };
-
-            // Try restore previous session
-            if (agent.LoadSession(SessionPath) && chatUI != null)
-            {
-                LoadChatSession();
-                chatUI.AddSystemMessage("[Session restored from previous run]");
-            }
-            else
-            {
-                chatUI?.AddSystemMessage(welcomeMessage);
-            }
-
-            Debug.Log("[MazeDemoManager] Initialized — chat mode active.");
         }
 
         private void OnDestroy()
         {
-            if (chatUI != null)
+            if (chatUI != null && agent != null)
             {
                 chatUI.UnbindAgent(agent);
                 chatUI.OnUserMessage -= HandleUserMessage;

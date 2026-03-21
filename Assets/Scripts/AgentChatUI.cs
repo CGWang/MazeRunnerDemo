@@ -46,21 +46,26 @@ namespace LLMAgent
 
         private enum MsgType { User, Assistant, Tool, System }
 
+        [Serializable]
         private struct ChatMsg
         {
             public MsgType type;
             public string text;
         }
 
-        private readonly List<ChatMsg> messages = new List<ChatMsg>();
+        // SerializeField: Unity auto-serializes these across Domain Reload
+        [SerializeField, HideInInspector]
+        private List<ChatMsg> messages = new List<ChatMsg>();
+        [SerializeField, HideInInspector]
         private string inputText = "";
+        [SerializeField, HideInInspector]
         private Vector2 scrollPos;
+        [SerializeField, HideInInspector]
+        private string tokenDisplayText = "";
+
         private bool autoScroll = true;
         private string streamingBuffer = "";
         private bool isStreaming;
-
-        // Token usage display
-        private string tokenDisplayText = "";
 
         // Permission dialog state
         private string permToolName;
