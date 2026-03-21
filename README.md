@@ -49,75 +49,103 @@
 └─────────────────────────────────────────────────┘
 ```
 
-## 已实现的工具（41 个）
+## 工具清单
 
-### Runtime 工具（运行时可用）
+### 目录结构与 unity-mcp 映射
 
-| 工具 | 说明 |
+```
+Tools/                          ← unity-mcp 对应
+├── AgentBatchExecuteTools.cs   ← BatchExecute.cs
+├── AgentToolHelpers.cs         ← (公共工具方法)
+├── Animation/                  ← Animation/
+│   ├── AgentAnimationTools.cs  ← ManageAnimation.cs (Animator 运行时控制)
+│   └── AgentAnimControllerTools.cs ← ControllerCreate/ClipCreate/ClipPresets
+├── Assets/                     ← ManageAsset.cs
+│   └── AgentAssetTools.cs
+├── Cameras/                    ← Cameras/
+│   └── AgentCameraTools.cs     ← ManageCamera.cs
+├── Components/                 ← ManageComponents.cs
+│   └── AgentComponentTools.cs
+├── Console/                    ← ReadConsole.cs
+│   └── AgentConsoleTools.cs
+├── GameObjects/                ← GameObjects/
+│   ├── AgentGameObjectTools.cs ← ManageGameObject.cs
+│   └── AgentSceneQueryTools.cs ← FindGameObjects.cs
+├── Graphics/                   ← Graphics/
+│   └── AgentGraphicsTools.cs   ← ManageGraphics.cs (Volume/Bake/Skybox/Pipeline)
+├── Materials/                  ← ManageMaterial.cs
+│   └── AgentMaterialTools.cs
+├── Packages/                   ← ManagePackages.cs
+│   └── AgentPackageTools.cs
+├── Physics/                    ← (扩展: 物理查询)
+│   └── AgentPhysicsTools.cs
+├── Prefabs/                    ← Prefabs/
+│   └── AgentPrefabTools.cs     ← ManagePrefabs.cs
+├── ProBuilder/                 ← ProBuilder/
+│   └── AgentProBuilderTools.cs ← ManageProBuilder.cs (反射调用)
+├── Reflection/                 ← UnityReflect.cs
+│   └── AgentReflectionTools.cs
+├── Scene/                      ← ManageScene.cs + ManageEditor.cs
+│   ├── AgentEditorControlTools.cs
+│   ├── AgentSceneManageTools.cs
+│   └── AgentScreenshotTools.cs
+├── ScriptableObjects/          ← ManageScriptableObject.cs
+│   └── AgentScriptableObjectTools.cs
+├── Scripts/                    ← ManageScript.cs
+│   └── AgentScriptTools.cs
+├── Shaders/                    ← ManageShader.cs
+│   └── AgentShaderTools.cs
+├── Tests/                      ← RunTests.cs
+│   └── AgentTestTools.cs
+├── Textures/                   ← ManageTexture.cs
+│   └── AgentTextureTools.cs
+├── UI/                         ← ManageUI.cs
+│   └── AgentUITools.cs
+└── Vfx/                        ← Vfx/
+    └── AgentVfxTools.cs        ← ManageVFX.cs (Particle/Line/Trail)
+```
+
+### 工具总览（27 个工具，150+ 个 action）
+
+| 工具 | 文件 | 主要 action | unity-mcp 对应 |
+|------|------|-------------|---------------|
+| `inspectGameObject` | GameObjects/ | inspect, create, destroy, setActive, setTransform, duplicate, setParent | manage_gameobject |
+| `listScene` / `findGameObjects` | GameObjects/ | 场景查询、搜索 | find_gameobjects |
+| `manageAnimation` | Animation/ | get_status, set_parameter, play, crossfade, set_speed | manage_animation (animator) |
+| `manageAnimController` | Animation/ | controller_create/add_state/add_transition/add_parameter/get_info/assign, clip_create/add_curve/create_preset/assign/add_event | manage_animation (controller/clip) |
+| `manageMaterial` | Materials/ | create, modify, list_shaders | manage_material |
+| `manageCamera` | Cameras/ | create, list, set_lens, set_target, set_priority, screenshot, get_info | manage_camera |
+| `manageGraphics` | Graphics/ | volume_create/add_effect/get_info/list_effects, bake_start/cancel/status/clear/get_settings/set_settings, skybox_get/set_material/set_ambient/set_fog/set_sun, pipeline_get_info/set_quality, stats_get/get_memory | manage_graphics |
+| `manageVfx` | Vfx/ | particle_create/get_info/set_main/set_emission/set_shape/play/stop/pause/enable_module/add_burst, line_create/set_positions/set_width/set_color/create_circle/create_arc, trail_create/set_time/set_width/set_color | manage_vfx |
+| `manageTexture` | Textures/ | create, create_sprite, modify, apply_pattern, apply_gradient, apply_noise, get_info | manage_texture |
+| `manageShader` | Shaders/ | create, read, update, delete, validate, list | manage_shader |
+| `manageUI` | UI/ | create, read, update, delete, list, attach/detach_ui_document, create_panel_settings, get_visual_tree | manage_ui |
+| `manageProBuilder` | ProBuilder/ | create_shape, extrude_faces, subdivide, get_mesh_info, set_face_material, flip_normals, merge_faces, center_pivot, validate_mesh | manage_probuilder |
+| `manageScriptableObject` | ScriptableObjects/ | create, modify, get_info | manage_scriptable_object |
+| `toggleComponent` / `addComponent` / etc. | Components/ | add, remove, toggle, set/get property | manage_components |
+| `readConsole` / `clearConsole` | Console/ | get, clear | read_console |
+| `callMethod` / `findMethods` | Reflection/ | 反射调用、方法搜索 | unity_reflect |
+| `physicsQuery` | Physics/ | raycast, overlap_sphere, overlap_box, linecast | (扩展) |
+| `editorControl` | Scene/ | play, pause, stop, step, status, add/remove_tag, add/remove_layer, set_active_tool | manage_editor |
+| `manageScene` | Scene/ | create, open, save, save_as, list, set_active, unload, new, get_hierarchy, get_active, get_build_settings, screenshot, scene_view_frame | manage_scene |
+| `captureView` | Scene/ | Game View / Scene View / Camera 截图 | manage_scene (screenshot) |
+| `manageAssets` / `findAssets` / `getAssetData` / `refreshAssets` / `listShaders` | Assets/ | 资产 CRUD、搜索、刷新 | manage_asset |
+| `createPrefab` / `instantiatePrefab` / `openPrefab` / `closePrefab` / `savePrefab` | Prefabs/ | Prefab 创建、实例化、编辑模式 | manage_prefabs |
+| `readScript` / `createScript` / `editScript` | Scripts/ | 脚本读写编辑 | manage_script |
+| `managePackage` | Packages/ | add, remove, list, search, get_info, list/add/remove_registry, embed, resolve | manage_packages |
+| `runTests` | Tests/ | EditMode / PlayMode 测试 | run_tests |
+| `batchExecute` | (root) | 批量执行多个工具操作 | batch_execute |
+
+### 尚未覆盖的 unity-mcp 功能
+
+| 模块 | 说明 |
 |------|------|
-| `inspectGameObject` | 获取 GameObject 详细信息（Transform、组件、子对象） |
-| `createGameObject` | 创建 GameObject，支持基础几何体 |
-| `destroyGameObject` | 删除 GameObject 及其子对象 |
-| `setActive` | 激活/隐藏 GameObject |
-| `setTransform` | 设置位置、旋转、缩放 |
-| `duplicateGameObject` | 复制 GameObject |
-| `setParent` | 修改父子关系 |
-| `manageMaterial` | 创建/修改材质 |
-| `readConsole` | 读取 Unity 控制台日志 |
-| `clearConsole` | 清空控制台 |
-| `manageAnimation` | Animator 控制（播放、参数、混合） |
-| `callMethod` | 通过反射调用组件方法 |
-| `findMethods` | 反射查找组件方法 |
-| `physicsQuery` | 物理查询（Raycast、Overlap） |
-| `toggleComponent` | 启用/禁用组件 |
-| `addComponent` | 添加组件 |
-| `removeComponent` | 移除组件 |
-| `setComponentProperty` | 设置组件属性 |
-| `getComponentProperty` | 读取组件属性 |
-| `listScene` | 列出场景中的 GameObject |
-| `findGameObjects` | 按名称/Tag/Layer/组件搜索 |
-
-### Editor 工具（仅编辑器可用）
-
-| 工具 | 说明 |
-|------|------|
-| `createPrefab` | 从场景对象创建 Prefab |
-| `instantiatePrefab` | 实例化 Prefab 到场景 |
-| `openPrefab` / `closePrefab` / `savePrefab` | Prefab 编辑模式 |
-| `readScript` | 读取脚本文件 |
-| `createScript` | 创建 C# 脚本（支持模板） |
-| `editScript` | 编辑脚本（替换、插入、删除） |
-| `editorControl` | 控制 Play/Pause/Stop |
-| `executeMenuItem` | 执行编辑器菜单项 |
-| `editorSelection` | 管理编辑器选中对象 |
-| `managePackage` | 包管理（安装、卸载、搜索） |
-| `manageScene` | 场景管理（创建、打开、保存） |
-| `captureView` | 截图（Game View / Scene View / Camera） |
-| `runTests` | 运行 Unity 测试 |
-| `manageAssets` | 资产管理（列表、移动、复制、删除） |
-| `findAssets` | 搜索项目资产 |
-| `getAssetData` | 获取资产详细信息 |
-| `refreshAssets` | 刷新 AssetDatabase |
-| `listShaders` | 列出可用 Shader |
-
-## 待移植的 unity-mcp 功能
-
-以下是 unity-mcp 中已实现但本项目尚未覆盖的功能模块：
-
-| 模块 | 说明 | 优先级 |
-|------|------|--------|
-| **UI Toolkit** (`manage_ui`) | UXML/USS 创建编辑、UIDocument 管理、VisualElement 样式修改 | 高 |
-| **Graphics / 渲染管线** (`manage_graphics`) | Volume 系统、光照烘焙、渲染统计、Skybox/雾效、渲染管线设置、Renderer Features | 高 |
-| **Texture** (`manage_texture`) | 程序化纹理生成（棋盘、条纹、噪声、渐变） | 中 |
-| **Shader** (`manage_shader`) | Shader 文件的 CRUD 和语法验证 | 中 |
-| **Camera / Cinemachine** (`manage_camera`) | 相机创建配置、Cinemachine 控制、多角度截图 | 中 |
-| **VFX** (`manage_vfx`) | ParticleSystem 控制、VFX Graph、LineRenderer、TrailRenderer | 中 |
-| **ProBuilder** (`manage_probuilder`) | 程序化建模（挤出、倒角、细分、UV 编辑） | 低 |
-| **Animation 扩展** | AnimatorController 创建、BlendTree、AnimationClip 预设 | 中 |
-| **ScriptableObject** | ScriptableObject 创建和修改 | 低 |
-| **Batch Execute** | 批量操作 + 原子事务回滚 | 中 |
-| **Roslyn 运行时编译** | 运行时 C# 编译执行 | 低 |
-| **Tag/Layer 管理** | 标签和层级的增删改 | 低 |
+| **VFX Graph** | VFX Graph 资产创建/参数设置（需要 com.unity.visualeffectgraph） |
+| **ProBuilder 完整版** | 已有 9 个核心 action，unity-mcp 有 50+（顶点操作、UV、选择等） |
+| **Roslyn 运行时编译** | 运行时 C# 编译执行（CustomTools/RoslynRuntimeCompilation） |
+| **Script 结构化编辑** | anchor_insert/replace/delete、方法级操作、Roslyn 语法验证 |
+| **Graphics Renderer Features** | URP Renderer Feature 增删配置（需 URP） |
+| **Camera Cinemachine 完整版** | 已支持基础 Cinemachine 反射，缺少 Body/Aim/Noise/Blend 详细配置 |
 
 ## 迷宫 Demo
 
