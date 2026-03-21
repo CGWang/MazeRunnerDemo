@@ -29,54 +29,8 @@ namespace LLMAgent
         }
 
         // =================================================================
-        // Maze-specific tools
+        // Maze-specific tools — auto-discovered via [AgentTool] attributes
         // =================================================================
-
-        protected override void RegisterTools()
-        {
-            agent.RegisterTool(
-                "getPlayerStatus",
-                "Get the player's current position and obstacle distances in all 4 cardinal " +
-                "directions (north/south/east/west), measured in grid cells. Also reports whether " +
-                "the goal has been reached.",
-                null,
-                HandleGetPlayerStatus
-            );
-
-            agent.RegisterTool(
-                "movePath",
-                "Move the player along a sequence of direction segments. Each segment has a " +
-                "compass direction and a number of grid cells to move. Stops early if blocked " +
-                "by a wall or if the goal is reached. Maximum 20 segments, 1-10 cells per step.",
-                @"{
-                    ""type"": ""object"",
-                    ""properties"": {
-                        ""segments"": {
-                            ""type"": ""array"",
-                            ""description"": ""Array of movement segments."",
-                            ""items"": {
-                                ""type"": ""object"",
-                                ""properties"": {
-                                    ""dir"": {
-                                        ""type"": ""string"",
-                                        ""enum"": [""north"", ""south"", ""east"", ""west""]
-                                    },
-                                    ""steps"": {
-                                        ""type"": ""integer"",
-                                        ""minimum"": 1,
-                                        ""maximum"": 10
-                                    }
-                                },
-                                ""required"": [""dir"", ""steps""]
-                            }
-                        }
-                    },
-                    ""required"": [""segments""]
-                }",
-                HandleMovePath,
-                requiresPermission: true
-            );
-        }
 
         // =================================================================
         // Agent response — check maze completion
@@ -103,6 +57,10 @@ namespace LLMAgent
         // Tool handlers
         // =================================================================
 
+        [AgentTool("getPlayerStatus",
+            "Get the player's current position and obstacle distances in all 4 cardinal " +
+            "directions (north/south/east/west), measured in grid cells. Also reports whether " +
+            "the goal has been reached.")]
         private IEnumerator HandleGetPlayerStatus(string arguments, Action<UnityAgent.ToolResult> callback)
         {
             string result = null;
@@ -112,6 +70,36 @@ namespace LLMAgent
             callback(new UnityAgent.ToolResult { content = result });
         }
 
+        [AgentTool("movePath",
+            "Move the player along a sequence of direction segments. Each segment has a " +
+            "compass direction and a number of grid cells to move. Stops early if blocked " +
+            "by a wall or if the goal is reached. Maximum 20 segments, 1-10 cells per step.",
+            ParametersJson = @"{
+                ""type"": ""object"",
+                ""properties"": {
+                    ""segments"": {
+                        ""type"": ""array"",
+                        ""description"": ""Array of movement segments."",
+                        ""items"": {
+                            ""type"": ""object"",
+                            ""properties"": {
+                                ""dir"": {
+                                    ""type"": ""string"",
+                                    ""enum"": [""north"", ""south"", ""east"", ""west""]
+                                },
+                                ""steps"": {
+                                    ""type"": ""integer"",
+                                    ""minimum"": 1,
+                                    ""maximum"": 10
+                                }
+                            },
+                            ""required"": [""dir"", ""steps""]
+                        }
+                    }
+                },
+                ""required"": [""segments""]
+            }",
+            RequiresPermission = true)]
         private IEnumerator HandleMovePath(string arguments, Action<UnityAgent.ToolResult> callback)
         {
             string directionsJson, distancesJson;

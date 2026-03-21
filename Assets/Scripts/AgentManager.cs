@@ -53,6 +53,10 @@ namespace LLMAgent
         [Tooltip("Agent data folder name (at project root, dot-prefixed).")]
         public string agentDataFolder = ".agent";
 
+        [Header("Tool Providers")]
+        [Tooltip("Additional MonoBehaviours with [AgentTool] methods to auto-discover.")]
+        public MonoBehaviour[] toolProviders;
+
         [Header("References")]
         public AgentChatUI chatUI;
         public AgentThinkingUI thinkingUI;
@@ -160,6 +164,7 @@ namespace LLMAgent
 
             agent.LoadMemory(MemoryPath);
             RegisterBuiltinTools();
+            DiscoverAttributeTools();
             RegisterTools();
 
             if (chatUI != null)
@@ -182,27 +187,36 @@ namespace LLMAgent
 
         private void RegisterBuiltinTools()
         {
-            agent.RegisterTool(
-                "captureScreenshot",
-                "Capture a screenshot of the current game view. Returns the image for visual analysis.",
-                null,
-                HandleCaptureScreenshot
-            );
-
-            agent.RegisterTool(
-                "updateMemory",
-                "Save important observations to long-term memory that persists across sessions.",
-                @"{""type"":""object"",""properties"":{""content"":{""type"":""string""," +
-                @"""description"":""The observation or note to save.""}},""required"":[""content""]}",
-                HandleUpdateMemory
-            );
+            // Built-in tools use [AgentTool] attributes — discovered by DiscoverAttributeTools().
+            // No manual registration needed.
         }
 
         /// <summary>
-        /// Override to register domain-specific tools.
-        /// Called during InitAgent(), after built-in tools are registered.
+        /// Override to register domain-specific tools via manual RegisterTool() calls.
+        /// Called during InitAgent(), after built-in tools and [AgentTool] auto-discovery.
+        /// For most cases, just add [AgentTool] attributes to your handler methods instead.
         /// </summary>
         protected virtual void RegisterTools() { }
+
+        /// <summary>
+        /// Scan this object and all toolProviders for [AgentTool] methods and register them.
+        /// </summary>
+        private void DiscoverAttributeTools()
+        {
+            int count = AgentToolDiscovery.RegisterToolsFrom(agent, this);
+
+            if (toolProviders != null)
+            {
+                foreach (var provider in toolProviders)
+                {
+                    if (provider != null)
+                        count += AgentToolDiscovery.RegisterToolsFrom(agent, provider);
+                }
+            }
+
+            if (count > 0)
+                Debug.Log($"[{GetType().Name}] Auto-discovered {count} tools via [AgentTool] attributes.");
+        }
 
         // =================================================================
         // User message handling
@@ -257,6 +271,8 @@ namespace LLMAgent
         // Built-in tool handlers
         // =================================================================
 
+        [AgentTool("captureScreenshot",
+            "Capture a screenshot of the current game view. Returns the image for visual analysis.")]
         private IEnumerator HandleCaptureScreenshot(string arguments, Action<UnityAgent.ToolResult> callback)
         {
             yield return new WaitForEndOfFrame();
@@ -296,6 +312,15 @@ namespace LLMAgent
             });
         }
 
+        public class UpdateMemoryParams
+        {
+            [ToolParam("The observation or note to save.", required: true)]
+            public string content;
+        }
+
+        [AgentTool("updateMemory",
+            "Save important observations to long-term memory that persists across sessions.",
+            ParametersType = typeof(UpdateMemoryParams))]
         private IEnumerator HandleUpdateMemory(string arguments, Action<UnityAgent.ToolResult> callback)
         {
             string content = UnityAgent.ExtractStringField(arguments, "content");
