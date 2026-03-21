@@ -59,6 +59,15 @@ namespace LLMAgent
         private string streamingBuffer = "";
         private bool isStreaming;
 
+        // Token usage display
+        private string tokenDisplayText = "";
+
+        // Permission dialog state
+        private string permToolName;
+        private string permDescription;
+        private Action<bool> permCallback;
+        private bool permPending;
+
         // GUI styles
         private GUIStyle panelBgStyle;
         private GUIStyle userMsgStyle;
@@ -68,9 +77,19 @@ namespace LLMAgent
         private GUIStyle inputStyle;
         private GUIStyle sendBtnStyle;
         private GUIStyle headerStyle;
+        private GUIStyle tokenBarStyle;
+        private GUIStyle permOverlayStyle;
+        private GUIStyle permBoxStyle;
+        private GUIStyle permBtnAllowStyle;
+        private GUIStyle permBtnDenyStyle;
         private bool stylesInit;
 
         // Textures
+        private Texture2D permOverlayTex;
+        private Texture2D permBoxTex;
+        private Texture2D allowBtnTex;
+        private Texture2D denyBtnTex;
+        private Texture2D tokenBarTex;
         private Texture2D panelBgTex;
         private Texture2D userBgTex;
         private Texture2D assistantBgTex;
@@ -89,6 +108,8 @@ namespace LLMAgent
             agent.OnToolCallEnd += OnToolCallEnd;
             agent.OnGenerationStart += OnGenStart;
             agent.OnGenerationEnd += OnGenEnd;
+            agent.OnTokenUsage += OnTokenUsage;
+            agent.OnPermissionRequired += OnPermissionRequest;
         }
 
         public void UnbindAgent(UnityAgent agent)
@@ -98,6 +119,8 @@ namespace LLMAgent
             agent.OnToolCallEnd -= OnToolCallEnd;
             agent.OnGenerationStart -= OnGenStart;
             agent.OnGenerationEnd -= OnGenEnd;
+            agent.OnTokenUsage -= OnTokenUsage;
+            agent.OnPermissionRequired -= OnPermissionRequest;
         }
 
         // =================================================================
@@ -127,6 +150,48 @@ namespace LLMAgent
             messages.Clear();
             streamingBuffer = "";
             isStreaming = false;
+        }
+
+        // =================================================================
+        // Session persistence for chat messages
+        // =================================================================
+
+        [Serializable]
+        public class ChatSaveData
+        {
+            public string[] types;
+            public string[] texts;
+        }
+
+        public ChatSaveData GetSaveData()
+        {
+            var types = new string[messages.Count];
+            var texts = new string[messages.Count];
+            for (int i = 0; i < messages.Count; i++)
+            {
+                types[i] = messages[i].type.ToString();
+                texts[i] = messages[i].text;
+            }
+            return new ChatSaveData { types = types, texts = texts };
+        }
+
+        public void LoadSaveData(ChatSaveData data)
+        {
+            messages.Clear();
+            if (data?.types == null) return;
+            for (int i = 0; i < data.types.Length && i < data.texts.Length; i++)
+            {
+                MsgType type;
+                switch (data.types[i])
+                {
+                    case "User": type = MsgType.User; break;
+                    case "Assistant": type = MsgType.Assistant; break;
+                    case "Tool": type = MsgType.Tool; break;
+                    default: type = MsgType.System; break;
+                }
+                messages.Add(new ChatMsg { type = type, text = data.texts[i] });
+            }
+            autoScroll = true;
         }
 
         // =================================================================
@@ -186,6 +251,19 @@ namespace LLMAgent
             }
         }
 
+        private void OnTokenUsage(UnityAgent.TokenUsage usage)
+        {
+            tokenDisplayText = $"Tokens: {usage.inputTokens:N0} in / {usage.outputTokens:N0} out";
+        }
+
+        private void OnPermissionRequest(string toolName, string description, Action<bool> callback)
+        {
+            permToolName = toolName;
+            permDescription = description;
+            permCallback = callback;
+            permPending = true;
+        }
+
         // =================================================================
         // OnGUI
         // =================================================================
@@ -243,6 +321,44 @@ namespace LLMAgent
             headerStyle.normal.textColor = new Color(0.8f, 0.8f, 0.85f);
             headerStyle.alignment = TextAnchor.MiddleCenter;
 
+            // Token bar
+            tokenBarTex = MakeTex(new Color(0.1f, 0.1f, 0.13f, 0.95f));
+            tokenBarStyle = new GUIStyle(GUI.skin.label);
+            tokenBarStyle.fontSize = fontSize - 2;
+            tokenBarStyle.normal.background = tokenBarTex;
+            tokenBarStyle.normal.textColor = new Color(0.6f, 0.7f, 0.6f);
+            tokenBarStyle.alignment = TextAnchor.MiddleCenter;
+            tokenBarStyle.padding = new RectOffset(4, 4, 2, 2);
+
+            // Permission dialog
+            permOverlayTex = MakeTex(new Color(0f, 0f, 0f, 0.6f));
+            permBoxTex = MakeTex(new Color(0.18f, 0.18f, 0.25f, 0.98f));
+            allowBtnTex = MakeTex(new Color(0.2f, 0.5f, 0.3f, 1f));
+            denyBtnTex = MakeTex(new Color(0.55f, 0.2f, 0.2f, 1f));
+
+            permOverlayStyle = new GUIStyle();
+            permOverlayStyle.normal.background = permOverlayTex;
+
+            permBoxStyle = new GUIStyle(GUI.skin.box);
+            permBoxStyle.normal.background = permBoxTex;
+            permBoxStyle.normal.textColor = Color.white;
+            permBoxStyle.fontSize = fontSize;
+            permBoxStyle.wordWrap = true;
+            permBoxStyle.alignment = TextAnchor.UpperLeft;
+            permBoxStyle.padding = new RectOffset(12, 12, 10, 10);
+
+            permBtnAllowStyle = new GUIStyle(GUI.skin.button);
+            permBtnAllowStyle.normal.background = allowBtnTex;
+            permBtnAllowStyle.normal.textColor = Color.white;
+            permBtnAllowStyle.fontStyle = FontStyle.Bold;
+            permBtnAllowStyle.fontSize = fontSize;
+
+            permBtnDenyStyle = new GUIStyle(GUI.skin.button);
+            permBtnDenyStyle.normal.background = denyBtnTex;
+            permBtnDenyStyle.normal.textColor = Color.white;
+            permBtnDenyStyle.fontStyle = FontStyle.Bold;
+            permBtnDenyStyle.fontSize = fontSize;
+
             stylesInit = true;
         }
 
@@ -286,8 +402,17 @@ namespace LLMAgent
             // Header
             GUI.Label(new Rect(panelX, pad, panelWidth, headerH), "AI Agent Chat", headerStyle);
 
+            // Token bar (below header)
+            float tokenBarH = 0f;
+            if (!string.IsNullOrEmpty(tokenDisplayText))
+            {
+                tokenBarH = 18f;
+                GUI.Label(new Rect(panelX + pad, pad + headerH, panelWidth - pad * 2, tokenBarH),
+                    tokenDisplayText, tokenBarStyle);
+            }
+
             // Message area
-            float msgAreaY = pad + headerH + pad;
+            float msgAreaY = pad + headerH + tokenBarH + pad;
             float msgAreaH = panelH - msgAreaY - bottomBarH;
             Rect scrollViewRect = new Rect(panelX + pad, msgAreaY, panelWidth - pad * 2, msgAreaH);
 
@@ -356,6 +481,42 @@ namespace LLMAgent
 
                 if (enterPressed) Event.current.Use();
             }
+
+            // --- Permission dialog overlay ---
+            if (permPending)
+            {
+                // Dim overlay over panel
+                GUI.Box(new Rect(panelX, 0, panelWidth, panelH), "", permOverlayStyle);
+
+                float dlgW = panelWidth - 40f;
+                float dlgH = 140f;
+                float dlgX = panelX + 20f;
+                float dlgY = panelH * 0.35f;
+
+                GUI.Box(new Rect(dlgX, dlgY, dlgW, dlgH), "", permBoxStyle);
+
+                GUI.Label(new Rect(dlgX + 12, dlgY + 8, dlgW - 24, 22),
+                    "<b>Permission Required</b>", permBoxStyle);
+                GUI.Label(new Rect(dlgX + 12, dlgY + 32, dlgW - 24, 50),
+                    $"Tool: <b>{permToolName}</b>\n{(permDescription != null && permDescription.Length > 120 ? permDescription.Substring(0, 120) + "..." : permDescription ?? "")}",
+                    permBoxStyle);
+
+                float btnW2 = (dlgW - 36) / 2;
+                float btnY = dlgY + dlgH - 38;
+
+                if (GUI.Button(new Rect(dlgX + 12, btnY, btnW2, 30), "Allow", permBtnAllowStyle))
+                {
+                    permPending = false;
+                    permCallback?.Invoke(true);
+                    permCallback = null;
+                }
+                if (GUI.Button(new Rect(dlgX + 12 + btnW2 + 12, btnY, btnW2, 30), "Deny", permBtnDenyStyle))
+                {
+                    permPending = false;
+                    permCallback?.Invoke(false);
+                    permCallback = null;
+                }
+            }
         }
 
         private float CalculateContentHeight(float width)
@@ -410,6 +571,11 @@ namespace LLMAgent
             if (toolBgTex != null) Destroy(toolBgTex);
             if (inputBgTex != null) Destroy(inputBgTex);
             if (sendBtnTex != null) Destroy(sendBtnTex);
+            if (tokenBarTex != null) Destroy(tokenBarTex);
+            if (permOverlayTex != null) Destroy(permOverlayTex);
+            if (permBoxTex != null) Destroy(permBoxTex);
+            if (allowBtnTex != null) Destroy(allowBtnTex);
+            if (denyBtnTex != null) Destroy(denyBtnTex);
         }
     }
 }

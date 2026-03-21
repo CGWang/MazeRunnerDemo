@@ -35,6 +35,27 @@ namespace LLMAgent
 
         public delegate IEnumerator ToolHandler(string arguments, Action<ToolResult> callback);
 
+        /// <summary>Permission request: toolName, argsSummary, respond(bool approved).</summary>
+        public delegate void PermissionRequestHandler(string toolName, string description, Action<bool> respond);
+
+        [Serializable]
+        public struct TokenUsage
+        {
+            public int inputTokens;
+            public int outputTokens;
+            public int totalTokens;
+        }
+
+        /// <summary>Session save data for persistence across recompiles.</summary>
+        [Serializable]
+        public class SessionData
+        {
+            public string[] history;
+            public int[] charCounts;
+            public int inputTokens;
+            public int outputTokens;
+        }
+
         // =================================================================
         // Events — subscribe from UI to visualize agent activity
         // =================================================================
@@ -53,6 +74,12 @@ namespace LLMAgent
 
         /// <summary>Fired when the agent finishes (text response or error).</summary>
         public event Action OnGenerationEnd;
+
+        /// <summary>Fired when a tool requires permission. UI should show Allow/Deny.</summary>
+        public event PermissionRequestHandler OnPermissionRequired;
+
+        /// <summary>Fired when token usage is updated (cumulative session totals).</summary>
+        public event Action<TokenUsage> OnTokenUsage;
 
         // =================================================================
         // Configuration
@@ -77,6 +104,7 @@ namespace LLMAgent
             public string name;
             public string definitionJson;
             public ToolHandler handler;
+            public bool requiresPermission;
         }
 
         private readonly List<RegisteredTool> tools = new List<RegisteredTool>();
@@ -91,6 +119,14 @@ namespace LLMAgent
         private readonly List<int> messageCharCounts = new List<int>();
         private bool isRunning;
         private bool abortRequested;
+
+        // Token usage tracking
+        private TokenUsage sessionUsage;
+        public TokenUsage SessionUsage => sessionUsage;
+
+        // Long-term memory
+        private string memoryContent = "";
+        public string MemoryContent => memoryContent;
 
         // =================================================================
         // Singleton
@@ -141,7 +177,8 @@ namespace LLMAgent
         // Public API — Tool registration
         // =================================================================
 
-        public void RegisterTool(string name, string description, string parametersJson, ToolHandler handler)
+        public void RegisterTool(string name, string description, string parametersJson,
+            ToolHandler handler, bool requiresPermission = false)
         {
             if (string.IsNullOrEmpty(parametersJson))
                 parametersJson = "{\"type\":\"object\",\"properties\":{},\"required\":[]}";
@@ -156,13 +193,13 @@ namespace LLMAgent
             {
                 if (tools[i].name == name)
                 {
-                    tools[i] = new RegisteredTool { name = name, definitionJson = defJson, handler = handler };
+                    tools[i] = new RegisteredTool { name = name, definitionJson = defJson, handler = handler, requiresPermission = requiresPermission };
                     toolsJsonDirty = true;
                     return;
                 }
             }
 
-            tools.Add(new RegisteredTool { name = name, definitionJson = defJson, handler = handler });
+            tools.Add(new RegisteredTool { name = name, definitionJson = defJson, handler = handler, requiresPermission = requiresPermission });
             toolsJsonDirty = true;
         }
 
@@ -208,6 +245,98 @@ namespace LLMAgent
         }
 
         // =================================================================
+        // Public API — Session persistence
+        // =================================================================
+
+        public void SaveSession(string path)
+        {
+            var data = new SessionData
+            {
+                history = conversationHistory.ToArray(),
+                charCounts = messageCharCounts.ToArray(),
+                inputTokens = sessionUsage.inputTokens,
+                outputTokens = sessionUsage.outputTokens
+            };
+            try
+            {
+                string dir = System.IO.Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
+                    System.IO.Directory.CreateDirectory(dir);
+                System.IO.File.WriteAllText(path, JsonUtility.ToJson(data, true));
+                Debug.Log($"[UnityAgent] Session saved ({conversationHistory.Count} messages)");
+            }
+            catch (Exception e) { Debug.LogError($"[UnityAgent] Save failed: {e.Message}"); }
+        }
+
+        public bool LoadSession(string path)
+        {
+            if (!System.IO.File.Exists(path)) return false;
+            try
+            {
+                var data = JsonUtility.FromJson<SessionData>(System.IO.File.ReadAllText(path));
+                if (data?.history == null) return false;
+                conversationHistory.Clear();
+                conversationHistory.AddRange(data.history);
+                messageCharCounts.Clear();
+                messageCharCounts.AddRange(data.charCounts);
+                sessionUsage.inputTokens = data.inputTokens;
+                sessionUsage.outputTokens = data.outputTokens;
+                sessionUsage.totalTokens = data.inputTokens + data.outputTokens;
+                Debug.Log($"[UnityAgent] Session restored ({conversationHistory.Count} messages)");
+                return true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[UnityAgent] Load failed: {e.Message}");
+                return false;
+            }
+        }
+
+        public void DeleteSession(string path)
+        {
+            if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+        }
+
+        // =================================================================
+        // Public API — Long-term memory
+        // =================================================================
+
+        public void LoadMemory(string path)
+        {
+            if (System.IO.File.Exists(path))
+            {
+                memoryContent = System.IO.File.ReadAllText(path);
+                Debug.Log($"[UnityAgent] Memory loaded ({memoryContent.Length} chars)");
+            }
+            else
+            {
+                memoryContent = "";
+                Debug.Log("[UnityAgent] No memory file found, starting fresh.");
+            }
+        }
+
+        public void AppendMemory(string path, string content)
+        {
+            if (string.IsNullOrEmpty(content)) return;
+            string entry = $"\n[{DateTime.Now:yyyy-MM-dd HH:mm}] {content}";
+            memoryContent += entry;
+            try
+            {
+                string dir = System.IO.Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
+                    System.IO.Directory.CreateDirectory(dir);
+                System.IO.File.AppendAllText(path, entry);
+            }
+            catch (Exception e) { Debug.LogError($"[UnityAgent] Memory write failed: {e.Message}"); }
+        }
+
+        public void ClearMemory(string path)
+        {
+            memoryContent = "";
+            if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+        }
+
+        // =================================================================
         // Agent loop — with streaming
         // =================================================================
 
@@ -247,6 +376,15 @@ namespace LLMAgent
                     yield break;
                 }
 
+                // Track token usage
+                if (streamResult.usage.totalTokens > 0)
+                {
+                    sessionUsage.inputTokens += streamResult.usage.inputTokens;
+                    sessionUsage.outputTokens += streamResult.usage.outputTokens;
+                    sessionUsage.totalTokens = sessionUsage.inputTokens + sessionUsage.outputTokens;
+                    OnTokenUsage?.Invoke(sessionUsage);
+                }
+
                 // Build assistant message JSON for history
                 string assistantMsgJson = BuildAssistantMessageJson(
                     streamResult.content, streamResult.toolCalls);
@@ -262,6 +400,27 @@ namespace LLMAgent
                         steps++;
                         progressCallback?.Invoke($"[{steps}/{maxSteps}] {tc.name}");
                         Debug.Log($"[UnityAgent] Step {steps}: {tc.name}({Truncate(tc.arguments, 120)})");
+
+                        // --- Permission check ---
+                        bool needsPermission = false;
+                        foreach (var t in tools)
+                            if (t.name == tc.name) { needsPermission = t.requiresPermission; break; }
+
+                        if (needsPermission && OnPermissionRequired != null)
+                        {
+                            bool? approved = null;
+                            OnPermissionRequired.Invoke(tc.name, Truncate(tc.arguments, 200),
+                                result => approved = result);
+                            while (approved == null) yield return null;
+
+                            if (!approved.Value)
+                            {
+                                string denyMsg = "{\"error\":\"Permission denied by user.\"}";
+                                AddMessage(BuildToolResultMessage(tc.id, denyMsg));
+                                OnToolCallEnd?.Invoke(tc.name, tc.id, "Permission denied");
+                                continue;
+                            }
+                        }
 
                         OnToolCallBegin?.Invoke(tc.name, tc.id);
 
@@ -322,6 +481,7 @@ namespace LLMAgent
         {
             public string content = "";
             public List<ToolCallInfo> toolCalls = new List<ToolCallInfo>();
+            public TokenUsage usage;
         }
 
         private struct ToolCallInfo
@@ -469,35 +629,60 @@ namespace LLMAgent
         {
             // Extract delta content
             int deltaIdx = json.IndexOf("\"delta\"", StringComparison.Ordinal);
-            if (deltaIdx < 0) return;
-
-            int deltaStart = json.IndexOf('{', deltaIdx);
-            if (deltaStart < 0) return;
-            int deltaEnd = FindMatchingBrace(json, deltaStart);
-            if (deltaEnd < 0) return;
-
-            string delta = json.Substring(deltaStart, deltaEnd - deltaStart + 1);
-
-            // Content token
-            string contentToken = ExtractStringField(delta, "content");
-            if (contentToken != null)
+            if (deltaIdx >= 0)
             {
-                result.content += contentToken;
-                OnStreamToken?.Invoke(contentToken);
+                int deltaStart = json.IndexOf('{', deltaIdx);
+                if (deltaStart >= 0)
+                {
+                    int deltaEnd = FindMatchingBrace(json, deltaStart);
+                    if (deltaEnd >= 0)
+                    {
+                        string delta = json.Substring(deltaStart, deltaEnd - deltaStart + 1);
+
+                        // Content token
+                        string contentToken = ExtractStringField(delta, "content");
+                        if (contentToken != null)
+                        {
+                            result.content += contentToken;
+                            OnStreamToken?.Invoke(contentToken);
+                        }
+
+                        // Tool calls (incremental)
+                        int tcIdx = delta.IndexOf("\"tool_calls\"", StringComparison.Ordinal);
+                        if (tcIdx >= 0)
+                        {
+                            int arrStart = delta.IndexOf('[', tcIdx);
+                            if (arrStart >= 0)
+                            {
+                                int arrEnd = FindMatchingBracket(delta, arrStart);
+                                if (arrEnd >= 0)
+                                {
+                                    string tcArr = delta.Substring(arrStart, arrEnd - arrStart + 1);
+                                    ParseStreamingToolCalls(tcArr, toolCallAccum);
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
-            // Tool calls (incremental)
-            int tcIdx = delta.IndexOf("\"tool_calls\"", StringComparison.Ordinal);
-            if (tcIdx >= 0)
+            // Extract usage (appears in final chunk)
+            int usageIdx = json.IndexOf("\"usage\"", StringComparison.Ordinal);
+            if (usageIdx >= 0)
             {
-                int arrStart = delta.IndexOf('[', tcIdx);
-                if (arrStart >= 0)
+                int usageStart = json.IndexOf('{', usageIdx);
+                if (usageStart >= 0)
                 {
-                    int arrEnd = FindMatchingBracket(delta, arrStart);
-                    if (arrEnd >= 0)
+                    int usageEnd = FindMatchingBrace(json, usageStart);
+                    if (usageEnd >= 0)
                     {
-                        string tcArr = delta.Substring(arrStart, arrEnd - arrStart + 1);
-                        ParseStreamingToolCalls(tcArr, toolCallAccum);
+                        string u = json.Substring(usageStart, usageEnd - usageStart + 1);
+                        string pt = ExtractNumberField(u, "prompt_tokens");
+                        string ct = ExtractNumberField(u, "completion_tokens");
+                        string tt = ExtractNumberField(u, "total_tokens");
+                        if (pt != null) int.TryParse(pt, out result.usage.inputTokens);
+                        if (ct != null) int.TryParse(ct, out result.usage.outputTokens);
+                        if (tt != null) int.TryParse(tt, out result.usage.totalTokens);
                     }
                 }
             }
@@ -639,13 +824,18 @@ namespace LLMAgent
 
         private string BuildRequestBody(bool disableTools, bool stream = false)
         {
+            // Build full system prompt with memory
+            string fullPrompt = systemPrompt;
+            if (!string.IsNullOrEmpty(memoryContent))
+                fullPrompt = "[Long-term Memory]\n" + memoryContent + "\n\n[Instructions]\n" + systemPrompt;
+
             var sb = new StringBuilder(4096);
             sb.Append("{");
             sb.Append($"\"model\":\"{EscapeJson(model)}\",");
-            if (stream) sb.Append("\"stream\":true,");
+            if (stream) sb.Append("\"stream\":true,\"stream_options\":{\"include_usage\":true},");
             sb.Append("\"messages\":[");
 
-            sb.Append($"{{\"role\":\"system\",\"content\":\"{EscapeJson(systemPrompt)}\"}}");
+            sb.Append($"{{\"role\":\"system\",\"content\":\"{EscapeJson(fullPrompt)}\"}}");
 
             if (disableTools)
             {

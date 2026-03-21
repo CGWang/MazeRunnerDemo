@@ -31,11 +31,23 @@ namespace LLMAgent
         public int screenshotWidth = 512;
         public int screenshotHeight = 512;
 
+        [Header("Persistence")]
+        [Tooltip("Auto-save session after each agent turn for recompile resilience.")]
+        public bool autoSaveSession = true;
+
+        [Header("Memory")]
+        [Tooltip("Path for long-term memory file (relative to Assets).")]
+        public string memoryFileName = "agent-memory.md";
+
         [Header("References")]
         public AgentChatUI chatUI;
         public MazeAgentUI agentUI;
 
         private UnityAgent agent;
+
+        private string SessionPath => Application.persistentDataPath + "/UnityAgent/agent-session.json";
+        private string ChatSessionPath => Application.persistentDataPath + "/UnityAgent/chat-session.json";
+        private string MemoryPath => Application.dataPath + "/" + memoryFileName;
 
         private void Awake()
         {
@@ -52,6 +64,9 @@ namespace LLMAgent
             if (!string.IsNullOrEmpty(apiKey))
                 agent.Configure(apiKey, baseURL, model, maxSteps);
 
+            // Load long-term memory
+            agent.LoadMemory(MemoryPath);
+
             RegisterTools();
 
             // Bind chat UI to agent events
@@ -59,12 +74,26 @@ namespace LLMAgent
             {
                 chatUI.BindAgent(agent);
                 chatUI.OnUserMessage += HandleUserMessage;
-                chatUI.AddSystemMessage(welcomeMessage);
             }
 
             // Wire up thinking bubble
             agent.OnGenerationStart += () => agentUI?.ShowThinking();
-            agent.OnGenerationEnd += () => agentUI?.HideThinking();
+            agent.OnGenerationEnd += () =>
+            {
+                agentUI?.HideThinking();
+                if (autoSaveSession) SaveAll();
+            };
+
+            // Try restore previous session
+            if (agent.LoadSession(SessionPath) && chatUI != null)
+            {
+                LoadChatSession();
+                chatUI.AddSystemMessage("[Session restored from previous run]");
+            }
+            else
+            {
+                chatUI?.AddSystemMessage(welcomeMessage);
+            }
 
             Debug.Log("[MazeDemoManager] Initialized — chat mode active.");
         }
@@ -177,7 +206,8 @@ namespace LLMAgent
                     },
                     ""required"": [""segments""]
                 }",
-                HandleMovePath
+                HandleMovePath,
+                requiresPermission: true
             );
 
             agent.RegisterTool(
@@ -186,6 +216,16 @@ namespace LLMAgent
                 "for visual analysis of the maze layout, walls, corridors, and goal marker.",
                 null,
                 HandleCaptureScreenshot
+            );
+
+            agent.RegisterTool(
+                "updateMemory",
+                "Save important observations to long-term memory that persists across sessions. " +
+                "Use this to remember: maze layout, dead ends, effective strategies, positions " +
+                "explored. Over time this helps you navigate more efficiently.",
+                @"{""type"":""object"",""properties"":{""content"":{""type"":""string""," +
+                @"""description"":""The observation or note to save.""}},""required"":[""content""]}",
+                HandleUpdateMemory
             );
         }
 
@@ -262,6 +302,20 @@ namespace LLMAgent
                 imageBase64 = Convert.ToBase64String(png),
                 imageMimeType = "image/png"
             });
+        }
+
+        private IEnumerator HandleUpdateMemory(string arguments, Action<UnityAgent.ToolResult> callback)
+        {
+            string content = UnityAgent.ExtractStringField(arguments, "content");
+            if (string.IsNullOrEmpty(content))
+            {
+                callback(new UnityAgent.ToolResult
+                    { content = "{\"success\":false,\"error\":\"No content provided.\"}" });
+                yield break;
+            }
+            agent.AppendMemory(MemoryPath, content);
+            callback(new UnityAgent.ToolResult
+                { content = "{\"success\":true,\"message\":\"Memory updated successfully.\"}" });
         }
 
         // =================================================================
@@ -367,11 +421,54 @@ namespace LLMAgent
             chatUI?.Clear();
             agentUI?.ResetUI();
 
+            // Delete session files
+            agent?.DeleteSession(SessionPath);
+            if (System.IO.File.Exists(ChatSessionPath))
+                System.IO.File.Delete(ChatSessionPath);
+
             var playerObj = GameObject.FindWithTag("Player");
             playerObj?.GetComponent<MazeGoalDetector>()?.ResetGoal();
 
             chatUI?.AddSystemMessage("Maze reset. " + welcomeMessage);
             agentUI?.SetStatus("Ready");
+        }
+
+        // =================================================================
+        // Session persistence
+        // =================================================================
+
+        private void SaveAll()
+        {
+            agent.SaveSession(SessionPath);
+            if (chatUI != null)
+            {
+                try
+                {
+                    var data = chatUI.GetSaveData();
+                    string dir = System.IO.Path.GetDirectoryName(ChatSessionPath);
+                    if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
+                        System.IO.Directory.CreateDirectory(dir);
+                    System.IO.File.WriteAllText(ChatSessionPath, JsonUtility.ToJson(data, true));
+                }
+                catch (Exception e) { Debug.LogError($"[MazeDemoManager] Chat save failed: {e.Message}"); }
+            }
+        }
+
+        private void LoadChatSession()
+        {
+            if (!System.IO.File.Exists(ChatSessionPath)) return;
+            try
+            {
+                string json = System.IO.File.ReadAllText(ChatSessionPath);
+                var data = JsonUtility.FromJson<AgentChatUI.ChatSaveData>(json);
+                chatUI.LoadSaveData(data);
+            }
+            catch (Exception e) { Debug.LogWarning($"[MazeDemoManager] Chat load failed: {e.Message}"); }
+        }
+
+        private void OnApplicationQuit()
+        {
+            if (autoSaveSession) SaveAll();
         }
     }
 }
