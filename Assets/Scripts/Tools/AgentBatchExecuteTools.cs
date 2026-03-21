@@ -18,10 +18,16 @@ namespace LLMAgent.Tools
     public class AgentBatchExecuteTools : MonoBehaviour
     {
         /// <summary>
-        /// Reference to the UnityAgent instance. Must be set during registration
-        /// so this tool can look up and invoke other registered tool handlers.
+        /// Reference to the UnityAgent instance. Auto-resolved via singleton on first use.
+        /// Can also be set explicitly via Inspector or script.
         /// </summary>
         public UnityAgent agent;
+
+        private UnityAgent GetAgent()
+        {
+            if (agent == null) agent = UnityAgent.Instance;
+            return agent;
+        }
 
         private const int DefaultMaxCommands = 25;
         private const int AbsoluteMaxCommands = 100;
@@ -37,9 +43,10 @@ namespace LLMAgent.Tools
             ParametersType = typeof(BatchExecuteParams))]
         private IEnumerator HandleBatchExecute(string arguments, Action<UnityAgent.ToolResult> callback)
         {
-            if (agent == null)
+            var agentRef = GetAgent();
+            if (agentRef == null)
             {
-                callback(AgentToolHelpers.Fail("BatchExecute: agent reference not set."));
+                callback(AgentToolHelpers.Fail("BatchExecute: UnityAgent instance not found."));
                 yield break;
             }
 
@@ -109,7 +116,7 @@ namespace LLMAgent.Tools
                 }
 
                 // Look up the tool handler
-                var handler = agent.FindToolHandler(cmd.tool);
+                var handler = agentRef.FindToolHandler(cmd.tool);
                 if (handler == null)
                 {
                     failureCount++;
@@ -178,7 +185,7 @@ namespace LLMAgent.Tools
 
                 // Determine success from the tool result
                 string content = toolResult.content ?? "";
-                bool callSucceeded = !content.Contains("\"success\":false") && !content.Contains("\"error\":");
+                bool callSucceeded = !content.Contains("\"success\":false");
 
                 if (callSucceeded)
                     successCount++;

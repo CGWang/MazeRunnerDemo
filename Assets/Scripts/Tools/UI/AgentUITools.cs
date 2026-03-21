@@ -283,7 +283,9 @@ namespace LLMAgent.Tools
                 ? new[] { assetFolder }
                 : null;
 
-            var assets = new List<object>();
+            var sb = new StringBuilder();
+            int totalCount = 0;
+            sb.Append("{\"success\":true,\"assets\":[");
 
             bool includeUxml = string.IsNullOrEmpty(filterType) ||
                                filterType.Equals("uxml", StringComparison.OrdinalIgnoreCase);
@@ -298,8 +300,12 @@ namespace LLMAgent.Tools
                 foreach (string guid in guids)
                 {
                     string ap = AssetDatabase.GUIDToAssetPath(guid);
-                    if (!string.IsNullOrEmpty(ap))
-                        assets.Add(new { path = ap, type = "uxml", name = Path.GetFileName(ap) });
+                    if (string.IsNullOrEmpty(ap)) continue;
+                    if (totalCount > 0) sb.Append(",");
+                    sb.Append("{\"path\":\"").Append(UnityAgent.EscapeJson(ap)).Append("\"");
+                    sb.Append(",\"type\":\"uxml\"");
+                    sb.Append(",\"name\":\"").Append(UnityAgent.EscapeJson(Path.GetFileName(ap))).Append("\"}");
+                    totalCount++;
                 }
             }
 
@@ -309,8 +315,12 @@ namespace LLMAgent.Tools
                 foreach (string guid in guids)
                 {
                     string ap = AssetDatabase.GUIDToAssetPath(guid);
-                    if (!string.IsNullOrEmpty(ap))
-                        assets.Add(new { path = ap, type = "uss", name = Path.GetFileName(ap) });
+                    if (string.IsNullOrEmpty(ap)) continue;
+                    if (totalCount > 0) sb.Append(",");
+                    sb.Append("{\"path\":\"").Append(UnityAgent.EscapeJson(ap)).Append("\"");
+                    sb.Append(",\"type\":\"uss\"");
+                    sb.Append(",\"name\":\"").Append(UnityAgent.EscapeJson(Path.GetFileName(ap))).Append("\"}");
+                    totalCount++;
                 }
             }
 
@@ -320,24 +330,16 @@ namespace LLMAgent.Tools
                 foreach (string guid in guids)
                 {
                     string ap = AssetDatabase.GUIDToAssetPath(guid);
-                    if (!string.IsNullOrEmpty(ap))
-                        assets.Add(new { path = ap, type = "PanelSettings", name = Path.GetFileName(ap) });
+                    if (string.IsNullOrEmpty(ap)) continue;
+                    if (totalCount > 0) sb.Append(",");
+                    sb.Append("{\"path\":\"").Append(UnityAgent.EscapeJson(ap)).Append("\"");
+                    sb.Append(",\"type\":\"PanelSettings\"");
+                    sb.Append(",\"name\":\"").Append(UnityAgent.EscapeJson(Path.GetFileName(ap))).Append("\"}");
+                    totalCount++;
                 }
             }
 
-            var sb = new StringBuilder();
-            sb.Append("{\"success\":true,\"total\":").Append(assets.Count).Append(",\"assets\":[");
-
-            for (int i = 0; i < assets.Count; i++)
-            {
-                if (i > 0) sb.Append(",");
-                dynamic item = assets[i];
-                sb.Append("{\"path\":\"").Append(UnityAgent.EscapeJson(item.path)).Append("\"");
-                sb.Append(",\"type\":\"").Append(item.type).Append("\"");
-                sb.Append(",\"name\":\"").Append(UnityAgent.EscapeJson(item.name)).Append("\"}");
-            }
-
-            sb.Append("]}");
+            sb.Append("],\"total\":").Append(totalCount).Append("}");
             callback(new UnityAgent.ToolResult { content = sb.ToString() });
             yield break;
         }
@@ -625,14 +627,7 @@ namespace LLMAgent.Tools
             sb.Append("}");
         }
 
-        private static string ToAssetPath(string fullPath)
-        {
-            fullPath = fullPath.Replace('\\', '/');
-            int idx = fullPath.IndexOf("Assets/", StringComparison.OrdinalIgnoreCase);
-            if (idx >= 0)
-                return fullPath.Substring(idx);
-            return fullPath;
-        }
+        private static string ToAssetPath(string fullPath) => AgentToolHelpers.ToAssetPath(fullPath);
 #endif
 
         // =================================================================

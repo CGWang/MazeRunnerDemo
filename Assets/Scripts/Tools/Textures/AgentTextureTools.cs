@@ -93,6 +93,13 @@ namespace LLMAgent.Tools
                 callback(AgentToolHelpers.Fail($"Invalid dimensions: {width}x{height}. Must be positive."));
                 yield break;
             }
+            if (width > MaxTextureDimension || height > MaxTextureDimension ||
+                (long)width * height > MaxTexturePixels)
+            {
+                callback(AgentToolHelpers.Fail(
+                    $"Dimensions {width}x{height} exceed limits (max {MaxTextureDimension}px per side, {MaxTexturePixels} total pixels)."));
+                yield break;
+            }
 
             string fillColor = UnityAgent.ExtractStringField(arguments, "fillColor");
 
@@ -292,9 +299,10 @@ namespace LLMAgent.Tools
             string color1Str = UnityAgent.ExtractStringField(arguments, "color1");
             string color2Str = UnityAgent.ExtractStringField(arguments, "color2");
 
-            if (width <= 0 || height <= 0)
+            if (ExceedsLimits(width, height))
             {
-                callback(AgentToolHelpers.Fail($"Invalid dimensions: {width}x{height}."));
+                callback(AgentToolHelpers.Fail(
+                    $"Dimensions {width}x{height} exceed limits (max {MaxTextureDimension}px, {MaxTexturePixels} total)."));
                 yield break;
             }
             if (patternSize <= 0)
@@ -359,9 +367,10 @@ namespace LLMAgent.Tools
             string startColorStr = UnityAgent.ExtractStringField(arguments, "startColor");
             string endColorStr = UnityAgent.ExtractStringField(arguments, "endColor");
 
-            if (width <= 0 || height <= 0)
+            if (ExceedsLimits(width, height))
             {
-                callback(AgentToolHelpers.Fail($"Invalid dimensions: {width}x{height}."));
+                callback(AgentToolHelpers.Fail(
+                    $"Dimensions {width}x{height} exceed limits (max {MaxTextureDimension}px, {MaxTexturePixels} total)."));
                 yield break;
             }
 
@@ -439,9 +448,10 @@ namespace LLMAgent.Tools
             string color1Str = UnityAgent.ExtractStringField(arguments, "color1");
             string color2Str = UnityAgent.ExtractStringField(arguments, "color2");
 
-            if (width <= 0 || height <= 0)
+            if (ExceedsLimits(width, height))
             {
-                callback(AgentToolHelpers.Fail($"Invalid dimensions: {width}x{height}."));
+                callback(AgentToolHelpers.Fail(
+                    $"Dimensions {width}x{height} exceed limits (max {MaxTextureDimension}px, {MaxTexturePixels} total)."));
                 yield break;
             }
             if (octaves <= 0)
@@ -564,6 +574,13 @@ namespace LLMAgent.Tools
         // Helpers
         // =================================================================
 
+        private static bool ExceedsLimits(int width, int height)
+        {
+            return width <= 0 || height <= 0 ||
+                   width > MaxTextureDimension || height > MaxTextureDimension ||
+                   (long)width * height > MaxTexturePixels;
+        }
+
         private static void FillTexture(Texture2D texture, Color color)
         {
             var pixels = new Color[texture.width * texture.height];
@@ -630,14 +647,7 @@ namespace LLMAgent.Tools
             importer.SaveAndReimport();
         }
 
-        private static string ToAssetPath(string fullPath)
-        {
-            fullPath = fullPath.Replace('\\', '/');
-            int idx = fullPath.IndexOf("Assets/", StringComparison.OrdinalIgnoreCase);
-            if (idx >= 0)
-                return fullPath.Substring(idx);
-            return fullPath;
-        }
+        private static string ToAssetPath(string fullPath) => AgentToolHelpers.ToAssetPath(fullPath);
 #endif
 
         // =================================================================

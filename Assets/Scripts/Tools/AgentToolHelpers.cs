@@ -332,5 +332,18 @@ namespace LLMAgent.Tools
                 path = "Assets/" + path;
             return path;
         }
+
+        /// <summary>
+        /// Convert a full filesystem path to a Unity-relative "Assets/..." path.
+        /// </summary>
+        public static string ToAssetPath(string fullPath)
+        {
+            if (string.IsNullOrEmpty(fullPath)) return fullPath;
+            fullPath = fullPath.Replace('\\', '/');
+            int idx = fullPath.IndexOf("Assets/", StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0)
+                return fullPath.Substring(idx);
+            return fullPath;
+        }
     }
 }

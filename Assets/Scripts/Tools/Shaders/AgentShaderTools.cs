@@ -365,14 +365,7 @@ namespace LLMAgent.Tools
             return null;
         }
 
-        private static string ToAssetPath(string fullPath)
-        {
-            fullPath = fullPath.Replace('\\', '/');
-            int idx = fullPath.IndexOf("Assets/", StringComparison.OrdinalIgnoreCase);
-            if (idx >= 0)
-                return fullPath.Substring(idx);
-            return fullPath;
-        }
+        private static string ToAssetPath(string fullPath) => AgentToolHelpers.ToAssetPath(fullPath);
 
         private static string GenerateDefaultShader(string name)
         {

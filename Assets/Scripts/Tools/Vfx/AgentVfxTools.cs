@@ -154,6 +154,14 @@ namespace LLMAgent.Tools
         // Helpers
         // ================================================================
 
+        private static Material CreateDefaultLineMaterial()
+        {
+            var shader = Shader.Find("Sprites/Default")
+                      ?? Shader.Find("Universal Render Pipeline/Unlit")
+                      ?? Shader.Find("Unlit/Color");
+            return shader != null ? new Material(shader) : null;
+        }
+
         private ParticleSystem FindPS(string arguments)
         {
             string target = UnityAgent.ExtractStringField(arguments, "target");
@@ -403,7 +411,8 @@ namespace LLMAgent.Tools
             float time = AgentToolHelpers.ParseFloat(UnityAgent.ExtractNumberField(arguments, "time"), 0f);
             int count = AgentToolHelpers.ParseInt(UnityAgent.ExtractNumberField(arguments, "count"), 30);
 
-            emission.SetBurst(emission.burstCount, new ParticleSystem.Burst(time, (short)count));
+            count = Mathf.Clamp(count, 1, 10000);
+            emission.SetBurst(emission.burstCount, new ParticleSystem.Burst(time, count));
             callback(AgentToolHelpers.Ok($"Burst added: count={count} at time={time:F2}s."));
         }
 
@@ -423,7 +432,8 @@ namespace LLMAgent.Tools
             lr.startWidth = 0.1f;
             lr.endWidth = 0.1f;
             lr.useWorldSpace = true;
-            lr.material = new Material(Shader.Find("Sprites/Default"));
+            var mat = CreateDefaultLineMaterial();
+            if (mat != null) lr.material = mat;
 
             callback(AgentToolHelpers.Ok($"LineRenderer '{goName}' created."));
         }
@@ -548,7 +558,8 @@ namespace LLMAgent.Tools
             lr.loop = true;
             lr.startWidth = 0.05f;
             lr.endWidth = 0.05f;
-            lr.material = new Material(Shader.Find("Sprites/Default"));
+            var mat = CreateDefaultLineMaterial();
+            if (mat != null) lr.material = mat;
             lr.positionCount = segments;
 
             for (int i = 0; i < segments; i++)
@@ -575,7 +586,8 @@ namespace LLMAgent.Tools
             lr.loop = false;
             lr.startWidth = 0.05f;
             lr.endWidth = 0.05f;
-            lr.material = new Material(Shader.Find("Sprites/Default"));
+            var mat = CreateDefaultLineMaterial();
+            if (mat != null) lr.material = mat;
             lr.positionCount = segments + 1;
 
             for (int i = 0; i <= segments; i++)
@@ -629,7 +641,8 @@ namespace LLMAgent.Tools
             tr.time = 1f;
             tr.startWidth = 0.2f;
             tr.endWidth = 0.05f;
-            tr.material = new Material(Shader.Find("Sprites/Default"));
+            var mat = CreateDefaultLineMaterial();
+            if (mat != null) tr.material = mat;
 
             callback(AgentToolHelpers.Ok($"TrailRenderer created on '{go.name}'."));
         }

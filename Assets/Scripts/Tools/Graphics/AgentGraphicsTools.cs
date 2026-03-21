@@ -210,6 +210,12 @@ namespace LLMAgent.Tools
             var effect = (VolumeComponent)ScriptableObject.CreateInstance(effectType);
             effect.active = true;
             volume.profile.components.Add(effect);
+
+            // Persist as sub-asset so it survives domain reload / editor restart
+            string profilePath = AssetDatabase.GetAssetPath(volume.profile);
+            if (!string.IsNullOrEmpty(profilePath))
+                AssetDatabase.AddObjectToAsset(effect, volume.profile);
+
             EditorUtility.SetDirty(volume.profile);
             AssetDatabase.SaveAssets();
 
