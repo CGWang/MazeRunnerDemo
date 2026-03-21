@@ -201,6 +201,279 @@ namespace LLMAgent.Tools
             callback(new UnityAgent.ToolResult { content = sb.ToString() });
         }
 
+        private string GetManifestPath()
+        {
+            return Path.Combine(Application.dataPath, "..", "Packages", "manifest.json");
+        }
+
+        private void HandleListRegistries(Action<UnityAgent.ToolResult> callback)
+        {
+            try
+            {
+                string manifestPath = GetManifestPath();
+                if (!File.Exists(manifestPath))
+                {
+                    callback(AgentToolHelpers.Fail("Packages/manifest.json not found."));
+                    return;
+                }
+
+                string manifestText = File.ReadAllText(manifestPath);
+                var sb = new StringBuilder();
+                sb.Append("{\"registries\":[");
+
+                // Simple JSON parsing for scopedRegistries array
+                int registriesStart = manifestText.IndexOf("\"scopedRegistries\"");
+                int count = 0;
+                if (registriesStart >= 0)
+                {
+                    int arrayStart = manifestText.IndexOf('[', registriesStart);
+                    if (arrayStart >= 0)
+                    {
+                        int depth = 0;
+                        int objStart = -1;
+                        for (int i = arrayStart; i < manifestText.Length; i++)
+                        {
+                            char c = manifestText[i];
+                            if (c == '[' && depth == 0) { depth = 1; continue; }
+                            if (c == '{' && depth == 1) { objStart = i; depth = 2; continue; }
+                            if (c == '{') { depth++; continue; }
+                            if (c == '}') { depth--; if (depth == 1 && objStart >= 0)
+                            {
+                                if (count > 0) sb.Append(",");
+                                sb.Append(manifestText.Substring(objStart, i - objStart + 1));
+                                count++;
+                                objStart = -1;
+                            }
+                            continue; }
+                            if (c == ']' && depth == 1) break;
+                        }
+                    }
+                }
+
+                sb.Append("],\"count\":").Append(count).Append("}");
+                callback(new UnityAgent.ToolResult { content = sb.ToString() });
+            }
+            catch (Exception e)
+            {
+                callback(AgentToolHelpers.Fail($"Failed to read registries: {e.Message}"));
+            }
+        }
+
+        private void HandleAddRegistry(string arguments, Action<UnityAgent.ToolResult> callback)
+        {
+            string regName = UnityAgent.ExtractStringField(arguments, "registryName");
+            string regUrl = UnityAgent.ExtractStringField(arguments, "registryUrl");
+            string scopesStr = UnityAgent.ExtractStringField(arguments, "scopes");
+
+            if (string.IsNullOrEmpty(regName))
+            {
+                callback(AgentToolHelpers.Fail("'registryName' is required for add_registry."));
+                return;
+            }
+            if (string.IsNullOrEmpty(regUrl))
+            {
+                callback(AgentToolHelpers.Fail("'registryUrl' is required for add_registry."));
+                return;
+            }
+            if (string.IsNullOrEmpty(scopesStr))
+            {
+                callback(AgentToolHelpers.Fail("'scopes' is required for add_registry (comma-separated)."));
+                return;
+            }
+
+            try
+            {
+                string manifestPath = GetManifestPath();
+                if (!File.Exists(manifestPath))
+                {
+                    callback(AgentToolHelpers.Fail("Packages/manifest.json not found."));
+                    return;
+                }
+
+                string manifestText = File.ReadAllText(manifestPath);
+
+                // Check for duplicate
+                if (manifestText.Contains(regName) || manifestText.Contains(regUrl))
+                {
+                    callback(AgentToolHelpers.Fail($"A registry with name '{regName}' or URL '{regUrl}' may already exist."));
+                    return;
+                }
+
+                // Build the registry JSON entry
+                string[] scopes = scopesStr.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+                var scopesSb = new StringBuilder();
+                for (int i = 0; i < scopes.Length; i++)
+                {
+                    if (i > 0) scopesSb.Append(", ");
+                    scopesSb.Append("\"").Append(scopes[i].Trim()).Append("\"");
+                }
+
+                string newEntry = "{\n      \"name\": \"" + regName + "\",\n      \"url\": \"" + regUrl +
+                    "\",\n      \"scopes\": [" + scopesSb + "]\n    }";
+
+                // Insert into scopedRegistries array or create it
+                int registriesIdx = manifestText.IndexOf("\"scopedRegistries\"");
+                if (registriesIdx >= 0)
+                {
+                    // Find closing bracket of the array
+                    int arrayStart = manifestText.IndexOf('[', registriesIdx);
+                    int arrayEnd = -1;
+                    int depth = 0;
+                    for (int i = arrayStart; i < manifestText.Length; i++)
+                    {
+                        if (manifestText[i] == '[') depth++;
+                        else if (manifestText[i] == ']') { depth--; if (depth == 0) { arrayEnd = i; break; } }
+                    }
+                    if (arrayEnd > arrayStart)
+                    {
+                        // Check if array has existing entries
+                        string inside = manifestText.Substring(arrayStart + 1, arrayEnd - arrayStart - 1).Trim();
+                        string prefix = string.IsNullOrEmpty(inside) ? "\n    " : ",\n    ";
+                        manifestText = manifestText.Insert(arrayEnd, prefix + newEntry);
+                    }
+                }
+                else
+                {
+                    // Add scopedRegistries before the closing brace
+                    int lastBrace = manifestText.LastIndexOf('}');
+                    string insertion = ",\n  \"scopedRegistries\": [\n    " + newEntry + "\n  ]";
+                    manifestText = manifestText.Insert(lastBrace, insertion);
+                }
+
+                File.WriteAllText(manifestPath, manifestText);
+                Client.Resolve();
+
+                callback(AgentToolHelpers.Ok($"Added scoped registry '{regName}' with URL '{regUrl}'."));
+            }
+            catch (Exception e)
+            {
+                callback(AgentToolHelpers.Fail($"Failed to add registry: {e.Message}"));
+            }
+        }
+
+        private void HandleRemoveRegistry(string arguments, Action<UnityAgent.ToolResult> callback)
+        {
+            string regName = UnityAgent.ExtractStringField(arguments, "registryName");
+            string regUrl = UnityAgent.ExtractStringField(arguments, "registryUrl");
+
+            if (string.IsNullOrEmpty(regName) && string.IsNullOrEmpty(regUrl))
+            {
+                callback(AgentToolHelpers.Fail("Either 'registryName' or 'registryUrl' is required for remove_registry."));
+                return;
+            }
+
+            try
+            {
+                string manifestPath = GetManifestPath();
+                if (!File.Exists(manifestPath))
+                {
+                    callback(AgentToolHelpers.Fail("Packages/manifest.json not found."));
+                    return;
+                }
+
+                string manifestText = File.ReadAllText(manifestPath);
+                int registriesIdx = manifestText.IndexOf("\"scopedRegistries\"");
+                if (registriesIdx < 0)
+                {
+                    callback(AgentToolHelpers.Fail("No scoped registries configured."));
+                    return;
+                }
+
+                // Find the registry object that matches name or url
+                string searchTerm = !string.IsNullOrEmpty(regName) ? regName : regUrl;
+                int entryStart = manifestText.IndexOf(searchTerm);
+                if (entryStart < 0)
+                {
+                    callback(AgentToolHelpers.Fail($"Registry matching '{searchTerm}' not found."));
+                    return;
+                }
+
+                // Walk backward to find the opening brace of this registry object
+                int objStart = manifestText.LastIndexOf('{', entryStart);
+                // Walk forward to find the closing brace
+                int depth = 0;
+                int objEnd = -1;
+                for (int i = objStart; i < manifestText.Length; i++)
+                {
+                    if (manifestText[i] == '{') depth++;
+                    else if (manifestText[i] == '}') { depth--; if (depth == 0) { objEnd = i; break; } }
+                }
+
+                if (objStart < 0 || objEnd < 0)
+                {
+                    callback(AgentToolHelpers.Fail("Failed to parse registry entry from manifest."));
+                    return;
+                }
+
+                // Remove the object including any leading comma/whitespace or trailing comma
+                int removeStart = objStart;
+                int removeEnd = objEnd + 1;
+
+                // Handle comma before or after
+                if (removeStart > 0 && manifestText[removeStart - 1] == ',')
+                    removeStart--;
+                else if (removeEnd < manifestText.Length && manifestText[removeEnd] == ',')
+                    removeEnd++;
+
+                // Trim whitespace around the removed section
+                while (removeStart > 0 && (manifestText[removeStart - 1] == ' ' || manifestText[removeStart - 1] == '\n' || manifestText[removeStart - 1] == '\r'))
+                    removeStart--;
+                // Keep at least one newline
+                if (removeStart > 0 && manifestText[removeStart - 1] != '\n')
+                    removeStart++;
+
+                manifestText = manifestText.Remove(removeStart, removeEnd - removeStart);
+                File.WriteAllText(manifestPath, manifestText);
+                Client.Resolve();
+
+                callback(AgentToolHelpers.Ok($"Removed scoped registry matching '{searchTerm}'."));
+            }
+            catch (Exception e)
+            {
+                callback(AgentToolHelpers.Fail($"Failed to remove registry: {e.Message}"));
+            }
+        }
+
+        private IEnumerator HandleEmbedPackage(string arguments, Action<UnityAgent.ToolResult> callback)
+        {
+            string packageId = UnityAgent.ExtractStringField(arguments, "packageId");
+            if (string.IsNullOrEmpty(packageId))
+            {
+                // Also try packageName as a fallback
+                packageId = UnityAgent.ExtractStringField(arguments, "packageName");
+            }
+            if (string.IsNullOrEmpty(packageId))
+            {
+                callback(AgentToolHelpers.Fail("'packageId' is required for embed_package."));
+                yield break;
+            }
+
+            var request = Client.Embed(packageId);
+            while (!request.IsCompleted) yield return null;
+
+            if (request.Status == StatusCode.Failure)
+            {
+                callback(AgentToolHelpers.Fail($"Embed failed: {request.Error?.message}"));
+                yield break;
+            }
+
+            callback(AgentToolHelpers.Ok(
+                $"Embedded {request.Result.displayName} ({request.Result.name}@{request.Result.version}) to local Packages folder."));
+        }
+
+        private void HandleResolvePackages(Action<UnityAgent.ToolResult> callback)
+        {
+            try
+            {
+                Client.Resolve();
+                callback(AgentToolHelpers.Ok("Package resolution triggered. Unity will re-resolve all packages."));
+            }
+            catch (Exception e)
+            {
+                callback(AgentToolHelpers.Fail($"Failed to trigger package resolution: {e.Message}"));
+            }
+        }
+
 #else
         void Awake()
         {
