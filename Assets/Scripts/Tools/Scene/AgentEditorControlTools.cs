@@ -1,10 +1,12 @@
 using System;
 using System.Collections;
+using System.Linq;
 using System.Text;
 using UnityEngine;
 
 #if UNITY_EDITOR
 using UnityEditor;
+using UnityEditorInternal;
 #endif
 
 namespace LLMAgent.Tools
@@ -20,10 +22,15 @@ namespace LLMAgent.Tools
         // Tool: editorControl
         // =================================================================
 
+        private const int FirstUserLayerIndex = 8;
+        private const int TotalLayerCount = 32;
+
         [AgentTool("editorControl",
-            "Control the Unity Editor play state. Actions: 'play' (enter play mode), " +
+            "Control the Unity Editor play state and manage tags/layers. Actions: 'play' (enter play mode), " +
             "'pause' (toggle pause), 'stop' (exit play mode), 'step' (advance one frame while paused), " +
-            "'status' (get current state).",
+            "'status' (get current state), 'add_tag' (add a project tag), 'remove_tag' (remove a tag), " +
+            "'add_layer' (add a user layer), 'remove_layer' (remove a user layer), " +
+            "'set_active_tool' (set Editor tool: View, Move, Rotate, Scale, Rect, Transform).",
             ParametersType = typeof(EditorControlParams))]
         private IEnumerator HandleEditorControl(string arguments, Action<UnityAgent.ToolResult> callback)
         {
@@ -68,9 +75,202 @@ namespace LLMAgent.Tools
                     callback(new UnityAgent.ToolResult { content = sb.ToString() });
                     break;
 
+                case "add_tag":
+                {
+                    string tagName = UnityAgent.ExtractStringField(arguments, "tagName");
+                    if (string.IsNullOrEmpty(tagName))
+                    {
+                        callback(AgentToolHelpers.Fail("'tagName' is required for add_tag."));
+                        break;
+                    }
+                    if (InternalEditorUtility.tags.Contains(tagName))
+                    {
+                        callback(AgentToolHelpers.Fail($"Tag '{tagName}' already exists."));
+                        break;
+                    }
+                    try
+                    {
+                        InternalEditorUtility.AddTag(tagName);
+                        AssetDatabase.SaveAssets();
+                        callback(AgentToolHelpers.Ok($"Tag '{tagName}' added successfully."));
+                    }
+                    catch (Exception e)
+                    {
+                        callback(AgentToolHelpers.Fail($"Failed to add tag '{tagName}': {e.Message}"));
+                    }
+                    break;
+                }
+
+                case "remove_tag":
+                {
+                    string tagName = UnityAgent.ExtractStringField(arguments, "tagName");
+                    if (string.IsNullOrEmpty(tagName))
+                    {
+                        callback(AgentToolHelpers.Fail("'tagName' is required for remove_tag."));
+                        break;
+                    }
+                    if (!InternalEditorUtility.tags.Contains(tagName))
+                    {
+                        callback(AgentToolHelpers.Fail($"Tag '{tagName}' does not exist."));
+                        break;
+                    }
+                    try
+                    {
+                        InternalEditorUtility.RemoveTag(tagName);
+                        AssetDatabase.SaveAssets();
+                        callback(AgentToolHelpers.Ok($"Tag '{tagName}' removed successfully."));
+                    }
+                    catch (Exception e)
+                    {
+                        callback(AgentToolHelpers.Fail($"Failed to remove tag '{tagName}': {e.Message}"));
+                    }
+                    break;
+                }
+
+                case "add_layer":
+                {
+                    string layerName = UnityAgent.ExtractStringField(arguments, "layerName");
+                    if (string.IsNullOrEmpty(layerName))
+                    {
+                        callback(AgentToolHelpers.Fail("'layerName' is required for add_layer."));
+                        break;
+                    }
+                    try
+                    {
+                        var tagManagerAssets = AssetDatabase.LoadAllAssetsAtPath("ProjectSettings/TagManager.asset");
+                        if (tagManagerAssets == null || tagManagerAssets.Length == 0)
+                        {
+                            callback(AgentToolHelpers.Fail("Could not access TagManager asset."));
+                            break;
+                        }
+                        var tagManager = new SerializedObject(tagManagerAssets[0]);
+                        SerializedProperty layersProp = tagManager.FindProperty("layers");
+                        if (layersProp == null || !layersProp.isArray)
+                        {
+                            callback(AgentToolHelpers.Fail("Could not find 'layers' property in TagManager."));
+                            break;
+                        }
+                        // Check if layer already exists
+                        for (int i = 0; i < TotalLayerCount; i++)
+                        {
+                            SerializedProperty sp = layersProp.GetArrayElementAtIndex(i);
+                            if (sp != null && layerName.Equals(sp.stringValue, StringComparison.OrdinalIgnoreCase))
+                            {
+                                callback(AgentToolHelpers.Fail($"Layer '{layerName}' already exists at index {i}."));
+                                yield break;
+                            }
+                        }
+                        // Find first empty user layer slot (8-31)
+                        int emptySlot = -1;
+                        for (int i = FirstUserLayerIndex; i < TotalLayerCount; i++)
+                        {
+                            SerializedProperty sp = layersProp.GetArrayElementAtIndex(i);
+                            if (sp != null && string.IsNullOrEmpty(sp.stringValue))
+                            {
+                                emptySlot = i;
+                                break;
+                            }
+                        }
+                        if (emptySlot == -1)
+                        {
+                            callback(AgentToolHelpers.Fail("No empty User Layer slots available (8-31 are full)."));
+                            break;
+                        }
+                        layersProp.GetArrayElementAtIndex(emptySlot).stringValue = layerName;
+                        tagManager.ApplyModifiedProperties();
+                        AssetDatabase.SaveAssets();
+                        callback(AgentToolHelpers.Ok($"Layer '{layerName}' added to slot {emptySlot}."));
+                    }
+                    catch (Exception e)
+                    {
+                        callback(AgentToolHelpers.Fail($"Failed to add layer '{layerName}': {e.Message}"));
+                    }
+                    break;
+                }
+
+                case "remove_layer":
+                {
+                    string layerName = UnityAgent.ExtractStringField(arguments, "layerName");
+                    if (string.IsNullOrEmpty(layerName))
+                    {
+                        callback(AgentToolHelpers.Fail("'layerName' is required for remove_layer."));
+                        break;
+                    }
+                    try
+                    {
+                        var tagManagerAssets = AssetDatabase.LoadAllAssetsAtPath("ProjectSettings/TagManager.asset");
+                        if (tagManagerAssets == null || tagManagerAssets.Length == 0)
+                        {
+                            callback(AgentToolHelpers.Fail("Could not access TagManager asset."));
+                            break;
+                        }
+                        var tagManager = new SerializedObject(tagManagerAssets[0]);
+                        SerializedProperty layersProp = tagManager.FindProperty("layers");
+                        if (layersProp == null || !layersProp.isArray)
+                        {
+                            callback(AgentToolHelpers.Fail("Could not find 'layers' property in TagManager."));
+                            break;
+                        }
+                        int foundIndex = -1;
+                        for (int i = FirstUserLayerIndex; i < TotalLayerCount; i++)
+                        {
+                            SerializedProperty sp = layersProp.GetArrayElementAtIndex(i);
+                            if (sp != null && layerName.Equals(sp.stringValue, StringComparison.OrdinalIgnoreCase))
+                            {
+                                foundIndex = i;
+                                break;
+                            }
+                        }
+                        if (foundIndex == -1)
+                        {
+                            callback(AgentToolHelpers.Fail($"User layer '{layerName}' not found."));
+                            break;
+                        }
+                        layersProp.GetArrayElementAtIndex(foundIndex).stringValue = string.Empty;
+                        tagManager.ApplyModifiedProperties();
+                        AssetDatabase.SaveAssets();
+                        callback(AgentToolHelpers.Ok($"Layer '{layerName}' (slot {foundIndex}) removed."));
+                    }
+                    catch (Exception e)
+                    {
+                        callback(AgentToolHelpers.Fail($"Failed to remove layer '{layerName}': {e.Message}"));
+                    }
+                    break;
+                }
+
+                case "set_active_tool":
+                {
+                    string toolName = UnityAgent.ExtractStringField(arguments, "toolName");
+                    if (string.IsNullOrEmpty(toolName))
+                    {
+                        callback(AgentToolHelpers.Fail("'toolName' is required for set_active_tool."));
+                        break;
+                    }
+                    try
+                    {
+                        Tool targetTool;
+                        if (Enum.TryParse<Tool>(toolName, true, out targetTool)
+                            && targetTool != Tool.None && targetTool <= Tool.Custom)
+                        {
+                            UnityEditor.Tools.current = targetTool;
+                            callback(AgentToolHelpers.Ok($"Set active tool to '{targetTool}'."));
+                        }
+                        else
+                        {
+                            callback(AgentToolHelpers.Fail(
+                                $"Could not parse '{toolName}' as a standard Unity Tool (View, Move, Rotate, Scale, Rect, Transform)."));
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        callback(AgentToolHelpers.Fail($"Error setting active tool: {e.Message}"));
+                    }
+                    break;
+                }
+
                 default:
                     callback(AgentToolHelpers.Fail(
-                        $"Unknown action '{action}'. Use: play, pause, stop, step, status."));
+                        $"Unknown action '{action}'. Use: play, pause, stop, step, status, add_tag, remove_tag, add_layer, remove_layer, set_active_tool."));
                     break;
             }
 
@@ -79,8 +279,14 @@ namespace LLMAgent.Tools
 
         public class EditorControlParams
         {
-            [ToolParam("Action: play, pause, stop, step, status.", required: true)]
+            [ToolParam("Action: play, pause, stop, step, status, add_tag, remove_tag, add_layer, remove_layer, set_active_tool.", required: true)]
             public string action;
+            [ToolParam("Tag name (for add_tag, remove_tag).")]
+            public string tagName;
+            [ToolParam("Layer name (for add_layer, remove_layer).")]
+            public string layerName;
+            [ToolParam("Tool name: View, Move, Rotate, Scale, Rect, Transform (for set_active_tool).")]
+            public string toolName;
         }
 
         // =================================================================

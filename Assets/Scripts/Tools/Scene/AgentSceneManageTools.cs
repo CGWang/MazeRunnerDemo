@@ -26,7 +26,10 @@ namespace LLMAgent.Tools
         [AgentTool("manageScene",
             "Manage Unity scenes. Actions: 'create' (new scene file), 'open' (load scene), " +
             "'save' (save current scene), 'save_as' (save to new path), 'list' (list opened scenes), " +
-            "'set_active' (set active scene), 'unload' (unload additive scene), 'new' (blank scene).",
+            "'set_active' (set active scene), 'unload' (unload additive scene), 'new' (blank scene), " +
+            "'get_hierarchy' (get scene hierarchy tree with pagination), 'get_active' (get active scene info), " +
+            "'get_build_settings' (get build settings scenes list), 'screenshot' (capture a screenshot), " +
+            "'scene_view_frame' (frame an object or entire scene in the Scene View).",
             ParametersType = typeof(ManageSceneParams))]
         private IEnumerator HandleManageScene(string arguments, Action<UnityAgent.ToolResult> callback)
         {
