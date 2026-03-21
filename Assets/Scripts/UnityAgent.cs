@@ -215,6 +215,20 @@ namespace LLMAgent
             toolsJsonDirty = true;
         }
 
+        /// <summary>
+        /// Look up a registered tool handler by name. Returns null if not found.
+        /// Used by batch execution to invoke other tools programmatically.
+        /// </summary>
+        public ToolHandler FindToolHandler(string toolName)
+        {
+            foreach (var t in tools)
+            {
+                if (t.name == toolName)
+                    return t.handler;
+            }
+            return null;
+        }
+
         // =================================================================
         // Public API — Conversation
         // =================================================================

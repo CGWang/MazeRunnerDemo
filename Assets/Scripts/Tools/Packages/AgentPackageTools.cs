@@ -1,6 +1,8 @@
 using System;
 using System.Collections;
+using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using UnityEngine;
 
 #if UNITY_EDITOR
@@ -25,7 +27,9 @@ namespace LLMAgent.Tools
         [AgentTool("managePackage",
             "Manage Unity packages via the Package Manager. Actions: 'list' (installed packages), " +
             "'add' (install package by name or git URL), 'remove' (uninstall package), " +
-            "'search' (search Unity registry).",
+            "'search' (search Unity registry), 'list_registries' (list scoped registries from manifest.json), " +
+            "'add_registry' (add a scoped registry), 'remove_registry' (remove a scoped registry), " +
+            "'embed_package' (embed a package locally), 'resolve_packages' (force resolve all packages).",
             ParametersType = typeof(ManagePackageParams))]
         private IEnumerator HandleManagePackage(string arguments, Action<UnityAgent.ToolResult> callback)
         {
@@ -51,23 +55,44 @@ namespace LLMAgent.Tools
                 case "search":
                     yield return HandleSearch(arguments, callback);
                     break;
+                case "list_registries":
+                    HandleListRegistries(callback);
+                    break;
+                case "add_registry":
+                    HandleAddRegistry(arguments, callback);
+                    break;
+                case "remove_registry":
+                    HandleRemoveRegistry(arguments, callback);
+                    break;
+                case "embed_package":
+                    yield return HandleEmbedPackage(arguments, callback);
+                    break;
+                case "resolve_packages":
+                    HandleResolvePackages(callback);
+                    break;
                 default:
                     callback(AgentToolHelpers.Fail(
-                        $"Unknown action '{action}'. Use: list, add, remove, search."));
+                        $"Unknown action '{action}'. Use: list, add, remove, search, list_registries, add_registry, remove_registry, embed_package, resolve_packages."));
                     break;
             }
         }
 
         public class ManagePackageParams
         {
-            [ToolParam("Action: list, add, remove, search.", required: true)]
+            [ToolParam("Action: list, add, remove, search, list_registries, add_registry, remove_registry, embed_package, resolve_packages.", required: true)]
             public string action;
-            [ToolParam("Package identifier for add (e.g. 'com.unity.textmeshpro', 'https://github.com/user/repo.git').")]
+            [ToolParam("Package identifier for add/embed_package (e.g. 'com.unity.textmeshpro', 'https://github.com/user/repo.git').")]
             public string packageId;
             [ToolParam("Package name for remove.")]
             public string packageName;
             [ToolParam("Search query (for search action).")]
             public string query;
+            [ToolParam("Registry name (for add_registry, remove_registry).")]
+            public string registryName;
+            [ToolParam("Registry URL (for add_registry, remove_registry).")]
+            public string registryUrl;
+            [ToolParam("Comma-separated scopes (for add_registry, e.g. 'com.example,com.example.sub').")]
+            public string scopes;
         }
 
         private IEnumerator HandleList(Action<UnityAgent.ToolResult> callback)
