@@ -36,8 +36,8 @@ namespace LLMAgent
         public bool autoSaveSession = true;
 
         [Header("Memory")]
-        [Tooltip("Path for long-term memory file (relative to Assets).")]
-        public string memoryFileName = "agent-memory.md";
+        [Tooltip("Agent data folder name (at project root, dot-prefixed like .claude/.codex).")]
+        public string agentDataFolder = ".agent";
 
         [Header("References")]
         public AgentChatUI chatUI;
@@ -45,9 +45,11 @@ namespace LLMAgent
 
         private UnityAgent agent;
 
-        private string SessionPath => Application.persistentDataPath + "/UnityAgent/agent-session.json";
-        private string ChatSessionPath => Application.persistentDataPath + "/UnityAgent/chat-session.json";
-        private string MemoryPath => Application.dataPath + "/" + memoryFileName;
+        /// <summary>Project root / .agent/ — sits alongside Assets, avoids triggering reimport.</summary>
+        private string AgentDataPath => System.IO.Path.Combine(Application.dataPath, "..", agentDataFolder);
+        private string SessionPath => System.IO.Path.Combine(AgentDataPath, "session.json");
+        private string ChatSessionPath => System.IO.Path.Combine(AgentDataPath, "chat-session.json");
+        private string MemoryPath => System.IO.Path.Combine(AgentDataPath, "memory.md");
 
         private void Awake()
         {
